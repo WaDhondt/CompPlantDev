@@ -1,0 +1,128 @@
+---
+title: 'Analysis of QC Filtered cells'
+author: 'WD'
+output:
+  pdf_document:
+    number_sections: yes
+    keep_tex: yes
+  html_document:
+    df_print: paged
+bibliography: references.bib
+---
+
+```{r echo=FALSE}
+library("SingleCellExperiment")
+library("Seurat")
+library("SeuratDisk")
+library("tidyverse")
+library("gridExtra")
+```
+
+Start by finding cells that were filtered during QC and preprocessing: 
+
+```{r}
+counts_tmp <- read_csv("../data/Denyer2019/GSE123818_Root_single_cell_wt_datamatrix.csv.gz")
+
+geneNames <- counts_tmp[, 1]
+counts_tmp <- counts_tmp[-c(1)]
+rownames(counts_tmp) <- geneNames$X1
+
+denyer_tmp <- CreateSeuratObject(counts_tmp, project="denyer.wt")
+rm(counts_tmp)
+```
+
+```{r}
+denyer_wt <- LoadH5Seurat("../intermediate_files/denyer_wt_lognormalized.h5seurat")
+remaining_cells <- colnames(denyer_wt)
+```
+
+
+```{r}
+denyer_tmp[["percent.mt"]] <- PercentageFeatureSet(denyer_tmp, pattern = "^ATM")
+denyer_tmp[["percent.clp"]] <- PercentageFeatureSet(denyer_tmp, pattern = "^ATC")
+```
+
+```{r}
+filtered_cells <- !(colnames(denyer_tmp) %in% remaining_cells)
+```
+
+
+```{r}
+denyer_tmp <- SCTransform(denyer_tmp, vars.to.regress = c("percent.mt", "percent.clp"), verbose=TRUE)
+denyer_tmp <- denyer_tmp[, filtered_cells]
+```
+
+Prepare object for mapping to reference
+
+```{r}
+denyer_tmp <- FindVariableFeatures(denyer_tmp, selection.method = "vst", nfeatures=2000)
+denyer_tmp <- RunPCA(denyer_tmp, features = VariableFeatures(object=denyer_tmp))
+denyer_tmp <- RunUMAP(denyer_tmp, dims=1:30, return.model=TRUE)
+```
+
+```{r}
+SaveH5Seurat(denyer_tmp, "../intermediate_files/denyer_wt_nonfiltered.h5seurat")
+```
+
+Calculate anchors and use them to map query data (cells that were filtered) onto reference (cells that remained after filtering).  
+
+```{r}
+set.seed(1234)
+denyer_wt <- RunUMAP(denyer_wt, dims = 1:30, return.model = TRUE)
+```
+
+
+```{r}
+root.anchors <- FindTransferAnchors(reference=denyer_wt, query=denyer_tmp, dims=1:30, reference.reduction="pca")
+denyer_tmp <- MapQuery(anchorset=root.anchors, reference=denyer_wt, query=denyer_tmp, refdata=list(celltype="Brady.annotation"), reference.reduction="pca", reduction.model="umap")
+```
+
+```{r}
+p1 <- DimPlot(denyer_wt, reduction = "umap", group.by = "Brady.annotation", label = TRUE, label.size = 3,
+    repel = TRUE) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(denyer_tmp, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE,
+    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+# Statistical testing
+
+----------------------------
+Are discarded cells enriched 
+for a specific cell type?
+----------------------------
+
+```{r}
+wt_annot_tab <- denyer_wt@meta.data$Brady.annotation %>% table() %>% data.frame()
+discarded_annot_tab <- denyer_tmp@meta.data$predicted.celltype %>% table() %>% data.frame()
+
+annot_tab <- merge(wt_annot_tab, discarded_annot_tab, by = ".", all = TRUE) %>% replace(is.na(.), 0) %>% column_to_rownames(".")
+```
+
+```{r}
+annot_test <- chisq.test(x = annot_tab, simulate.p.value = TRUE, B = 5000)
+annot_test$expected
+```
+
+----------------------------
+Are discarded cells enriched 
+for a ploidy level?
+----------------------------
+
+```{r}
+wt_ploidy_tab <- table(denyer_wt@meta.data$ploidy.ID.P)
+discarded_ploidy_tab <- table(discarded_cells@meta.data$ploidy.ID.P)
+
+ploidy_tab <- merge(wt_ploidy_tab, discarded_ploidy_tab, by = "Var1", all = TRUE) %>% replace(is.na(.), 0) %>% column_to_rownames("Var1")
+```
+
+
+```{r}
+ploidy_test <- chisq.test(x = ploidy_tab, simulate.p.value = TRUE, B = 5000)
+ploidy_test$expected
+```
+
+
+
+
+

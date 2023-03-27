@@ -1,0 +1,197 @@
+---
+title: 'Preprocessing'
+author: 'WD'
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    number_sections: yes
+    keep_tex: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, autodep = TRUE, warning = FALSE, 
+                      message = FALSE, echo = FALSE, eval = TRUE, tidy = TRUE,
+                      fig.width = 6, fig.height = 3.5, purl = TRUE, 
+                      fig.show = "hold", fig.pos = "p")
+```
+
+R Packages we will need, and checking whether necessary python packages for PacMAP are installed:
+
+```{r echo=FALSE}
+library("Seurat")
+library("tidyverse")
+library("dplyr")
+library("ggplot2")
+library("gridExtra")
+library("SeuratDisk")
+library("kableExtra")
+```
+
+
+# Data
+
+```{r}
+counts_wt <- read_csv("../data/Denyer2019/GSE123818_Root_single_cell_wt_datamatrix.csv.gz")
+```
+
+```{r}
+geneNames_wt <- counts_wt[, 1]
+counts_wt <- counts_wt[-c(1)]
+rownames(counts_wt) <- geneNames_wt$X1
+```
+
+```{r}
+#Check if protoplast DE genes have been removed
+library(readxl)
+protoplast_DE <- read_excel("../data/Denyer2019/supplementary_tab_1.xlsx", 
+                            sheet="DEGs upon Protopasting")
+
+counts_wt <- counts_wt %>%
+                  rownames_to_column("gene") %>%
+                  subset(!gene %in% protoplast_DE$`Gene ID`) %>%
+                  column_to_rownames("gene")
+```
+
+```{r}
+dim(counts_wt)
+```
+
+
+# QC metrics, data normalization, scaling, feature selection
+
+## QC
+
+```{r}
+#start by creating seurat object
+denyer_wt <- CreateSeuratObject(counts_wt, project="denyer.wt")
+denyer_wt
+```
+
+```{r}
+rm(geneNames_wt)
+rm(protoplast_DE)
+rm(counts_wt)
+```
+
+Motivation for QC (non-exhaustive): 
+
+- Low quality cells can cluster together based on similarity in e.g. damage-induced genes or enrichment in mitochondrial genes and create intermediate states that are not biologically correct (especially important considering we are performing TI downstream). 
+
+- Interferes with dimensionality reduction: principal components will be dominated by genes with high variation between low and high quality cells. 
+
+--> remove low quality cells based on (heuristic) QC diagnostics. 
+
+1. Remove cells with libraries that are very small (loss of RNA during library prep) or too big (doublets). 
+2. Similar to (1.),  remove cells with very few features or conversely much more features than the rest. 
+3. Remove cells with high % of mitochondrial and/or chloroplast genes, >5% is often used as a cutoff for low quality cells.
+
+
+```{r}
+#add metadata on % reads mapping to chloroplast and mitochondrial genes, see https://www.arabidopsis.org/portals/nomenclature/guidelines.jsp
+denyer_wt[["percent.mt"]] <- PercentageFeatureSet(denyer_wt, pattern = "^ATM")
+denyer_wt[["percent.clp"]] <- PercentageFeatureSet(denyer_wt, pattern = "^ATC")
+```
+
+
+```{r}
+# Visualize QC metrics as a violin plot
+p1 <- VlnPlot(denyer_wt, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.clp"), ncol = 4)
+p1
+```
+
+Mitochondrial and chloroplast genes do not seem to be an issue here. Their contribution to the library is quite low:
+
+```{r}
+clp_mt_qc <- cbind(summary(denyer_wt@meta.data$percent.mt), 
+                   summary(denyer_wt@meta.data$percent.clp))
+colnames(clp_mt_qc) <- c("wt %mt", "wt %clp")
+clp_mt_qc %>% kable()
+```
+
+There are no cells with higher than 5% mitochondrial or chloroplast reads (or even both, if you want to split the common 5% threshold between the two), so we don't have to take this into account. 
+
+
+```{r}
+p2 <- FeatureScatter(denyer_wt, feature1="nCount_RNA", feature2="nFeature_RNA")
+p2
+```
+
+Cells that have much higher counts *and* features are likely doublets of two cell types. Cells with higher counts but a 'normal' number of features could correspond to either bigger cells (more of the same transcripts) or doublets of the same/similar cell type. Based on these plots, reasonable ad hoc cut off values would be 200<features<10^4 and counts < 10^5. 
+
+```{r}
+denyer_wt <- subset(denyer_wt, subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & nCount_RNA < 10**5)
+denyer_wt
+```
+
+Another possibility would be to use adaptive threshold, i.e. set a threshold that removes outliers based on the deviation from the mean of a QC metric (e.g. > 3sd). 
+
+The filtering removed `r 4727-length(Cells(denyer_wt))` cells from the wt dataset, leaving us with `r length(Cells(denyer_wt))`. 
+
+## Normalization
+
+The assumption here is that any cell-specific bias (e.g., in capture or amplification efficiency) affects all genes equally and just scales all feature counts for that cell. The size factor for each cell represents the estimate of the relative bias in that cell, so division of its counts by its size factor should remove that bias (source: OSCA book). 
+
+Default in Seurat is global normalization that normalizes feature counts per cell by the total counts per cell (x10**4 and log-scale). Other methods (e.g. RPKM) take into account the effect of gene length, and divide RPM/CPM by the gene length in kb. 
+
+
+```{r eval=FALSE, include=FALSE}
+p3 <- ggplot() + 
+  geom_histogram(aes(denyer_wt@meta.data$nCount_RNA), bins=50) + 
+  labs(x = "counts/cell", y = "frequency", 
+       title = "wt: Counts/cell before normalization")
+
+denyer_wt <- NormalizeData(denyer_wt, normalization.method = "LogNormalize", scale.factor=10000)
+
+p4 <- ggplot() + 
+  geom_histogram(aes(colSums(denyer_wt[["RNA"]]@data)), bins=50) + 
+  labs(x = "counts/cell", y = "frequency", 
+       title = "wt: Counts/cell after normalization")
+
+
+grid.arrange(p3, p4)
+```
+
+Other normalization method to explore: 
+
+- normalization by deconvolution (account for compositional bias between cells due to DE)
+
+## Feature selection
+
+Goal: select most variable genes based on expression over all cells. 
+
+
+```{r}
+denyer_wt <- FindVariableFeatures(denyer_wt, selection.method = "vst", nfeatures=2000)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+wt_top10 <- head(VariableFeatures(denyer_wt), 10)
+
+p5 <- VariableFeaturePlot(denyer_wt) + 
+  theme(legend.position = "top") + 
+  guides(color=guide_legend(nrow=2,byrow=TRUE)) + 
+  labs(title="Variable features (wt)")
+
+p6 <- LabelPoints(plot=p5, points=wt_top10, repel=TRUE)
+
+p6
+```
+
+The top n variable features are just the n features with the highest variance across all cells (taking into account the mean-variance relation)
+
+## Scaling
+
+Scale the data:
+- mean centering (mean expression of gene x across cells = 0)
+- scale to unit variance
+
+
+```{r}
+denyer_wt <- ScaleData(denyer_wt, features = rownames(denyer_wt))
+```
+
+```{r}
+SaveH5Seurat(denyer_wt, filename = "../intermediate_files/denyer_wt_lognormalized.h5seurat")
+```

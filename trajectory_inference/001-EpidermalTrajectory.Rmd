@@ -1,0 +1,535 @@
+---
+title: "Trajectory inference on epidermal lineage"
+author: "WD"
+date: "13/3/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("Seurat")
+library("SeuratDisk")
+library("SingleCellExperiment")
+library("slingshot")
+library("tidyverse")
+library("clusterExperiment")
+library("RColorBrewer")
+library("tradeSeq")
+library("epoch")
+library("ggplotify")
+library("patchwork")
+```
+
+```{r}
+denyer <- LoadH5Seurat("../intermediate_files/denyer_wt_sctransform_annotated.h5seurat")
+```
+
+General workflow:
+
+- Subset epidermal lineage cells
+
+2 different ways: 1 is to use PCA and UMAP embeddings of the entire dataset, other is to rerun PCA and UMAP
+
+- Find lineages
+- Fit trajectories
+- Tradeseq
+
+
+# Trajectory inference on epidermal and cortex lineage cells
+
+```{r}
+identities = c("QC", "Cortex 1", "Cortex 2", "Meristematic 1", "Meristematic 2", "Atrichoblast 1", "Atrichoblast 2", "Trichoblast 1", "Trichoblast 2")
+epidermal_lineage <- denyer[, (denyer@meta.data$Brady.annotation %in% identities)]
+epidermal_lineage[["epidermal_lineage"]] <- Idents(epidermal_lineage)
+```
+
+## Get Lineage Data
+
+```{r}
+# copy object
+set.seed(1234)
+epidermal_lineage_rerun <- RunPCA(epidermal_lineage, features = VariableFeatures(epidermal_lineage))
+epidermal_lineage_rerun <- RunUMAP(epidermal_lineage, dims = 1:30)
+
+dimred <- epidermal_lineage@reductions$umap@cell.embeddings
+clustering <- epidermal_lineage$epidermal_lineage
+counts <- as.matrix(epidermal_lineage@assays$SCT@counts[epidermal_lineage@assays$SCT@var.features, ])
+```
+
+## Define cell lineages
+
+```{r}
+set.seed(1234)
+epidermal_sce <- as.SingleCellExperiment(epidermal_lineage)
+epidermal_sce <- getLineages(reducedDims(epidermal_sce)$UMAP, clusterLabels = clustering, start.clus = "QC", end.clus = c("Trichoblast 2", "Atrichoblast 1", "Cortex 1"))
+```
+
+Get principal curves and convert to SlingshotDataset
+
+```{r}
+epidermal_sce <- getCurves(epidermal_sce, approx_points = 300, thresh = 0.01, stretch = 0.8, allow.breaks = FALSE, shrink = 0.99)
+epidermal_sds <- SlingshotDataSet(epidermal_sce)
+```
+
+Plot lineages on 2D UMAP embedding. 
+
+```{r}
+plot(epidermal_sce@reducedDim, col = brewer.pal(9,'Set1')[clustering], pch=16, asp = 1)
+lines(epidermal_sds, lwd=2, type = 'curves', col = 'black')
+```
+
+Better in ggplot
+
+```{r}
+dfs <- lapply(seq_along(slingCurves(epidermal_sce)), function(l){
+    crv <- slingCurves(epidermal_sce)[[l]]
+    df <- data.frame(crv$s[crv$ord, ])
+    df$curve <- l
+    return(df)
+})
+curvedata <- do.call(rbind, dfs)
+```
+
+```{r}
+p <- data.frame(epidermal_sce@reducedDim) %>%
+  ggplot(aes(x = UMAP_1, y = UMAP_2)) + geom_point(aes(color = clustering)) + geom_path(data = data.frame(curvedata), aes(x = UMAP_1, y = UMAP_2, group = curve)) + theme_void()
+```
+
+## Interactive 3D Plotly
+
+```{r}
+dfs <- lapply(seq_along(slingCurves(epidermal_sce)), function(l){
+    crv <- slingCurves(epidermal_sce)[[l]]
+    df <- data.frame(crv$s[crv$ord, ])
+    df$curve <- l
+    return(df)
+})
+curvedata <- do.call(rbind, dfs)
+```
+
+```{r}
+head(curvedata)
+```
+
+Plot in 3D using plotly (rerun UMAP for 3D embedding in order to do this.)
+
+```{r}
+# plot.data <- FetchData(object = epidermal_lineage, vars = c("UMAP_1", "UMAP_2", "UMAP_3", "epidermal_lineage"))
+# 
+# # Make a column of row name identities (these will be your cell/barcode names)
+# plot.data$label <- paste(rownames(plot.data))
+# 
+# fig2 <- curvedata %>% group_by(curve) %>%
+#   plot_ly(data = ., 
+#               x = ~UMAP_1, y=~UMAP_2, z=~UMAP_3,
+#               type = "scatter3d", mode="lines", marker=list(size=3)) %>% add_trace(data = plot.data, 
+#         x = ~UMAP_1, y = ~UMAP_2, z = ~UMAP_3, 
+#         color = ~epidermal_lineage,
+#         type = "scatter3d", 
+#         mode = "markers", 
+#         marker = list(size = 5, width=2, alpha=0.6), # controls size of points
+#         text=~label, #This is that extra column we made earlier for which we will use for cell ID
+#         hoverinfo="text")
+```
+
+Keep working with these lineages. 
+
+## DE genes along pseudotime using tradeSeq
+
+We have to start by choosing an appropriate number of knots.
+
+```{r}
+set.seed(1234)
+epidermal_K <- evaluateK(counts = counts, sds = epidermal_sds, k = 3:10, nGenes = 100,
+                   verbose = TRUE, plot = TRUE)
+```
+
+Fit gene-wise NB-GAMs using nknots = 6.
+
+```{r}
+cellweights <- slingCurveWeights(epidermal_sds)
+epidermal_tradeseq <- fitGAM(counts = counts,
+              sds = epidermal_sds,
+              cellWeights = cellweights,
+              nknots=6, verbose = TRUE)
+saveRDS(epidermal_tradeseq, file = "../intermediate_files/epidermal_tradeseq.rds")
+```
+
+```{r}
+table(rowData(epidermal_tradeseq)$tradeSeq$converged)
+```
+
+Find genes that are DE at endpoint, these can be interpreted as markers for the epidermal cell differentiated end states. 
+
+```{r}
+epidermal_endtests <- diffEndTest(epidermal_tradeseq)
+head(epidermal_endtests)
+```
+
+Find top genes (ranked by Wald test statistic) and fetch gene annotation. 
+
+```{r}
+library(org.At.tair.db)
+x <- org.At.tairGENENAME
+mapped_tairs <- mappedkeys(x)
+xx <- as.list(x[mapped_tairs])
+t <- unlist(xx) %>% as.data.frame() %>% rownames_to_column("ID")
+```
+
+```{r}
+tmp <- epidermal_endtests %>% 
+  filter(pvalue < 0.01) %>% 
+  rownames_to_column("ID") %>% 
+  merge(t) %>% 
+  rename("annotation" = ".") %>% 
+  arrange(desc(waldStat))
+
+View(tmp)
+```
+
+```{r}
+topgenes <- epidermal_endtests[order(epidermal_endtests$waldStat, decreasing = TRUE), ] %>% slice_head(n = 10)
+rownames(topgenes)  
+```
+
+```{r}
+epidermal_patterntests <- patternTest(sce)
+toppattern <- epidermal_patterntests[order(epidermal_patterntests$waldStat, decreasing = TRUE), ] %>% slice_head(n = 10)
+toppattern
+```
+
+# Fate specifying genes
+
+Find genes DE right after bifurcation (i.e. between first two knots). 
+
+```{r}
+plotGeneCount(curve = curves, counts = counts,
+              clusters = apply(slingClusterLabels(epidermal_slingshot), 1, which.max),
+              models = sce)
+```
+
+```{r}
+earlyDERes <- earlyDETest(sce, knots = c(1, 2))
+earlyDERes <- earlyDERes[order(earlyDERes$waldStat, decreasing = TRUE), ]
+```
+
+```{r}
+# 
+# # p1 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT3G27920") + labs(title = "GLABRA1")
+# p2 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT1G79840") + labs(title = "GLABRA2")
+# # p3 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT5G41315") + labs(title = "GLABRA3")
+# # p4 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT5G24520.") + labs(title = "TTG1")
+# # p5 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT1G63650") + labs(title = "EGL3")
+# p6 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT5G14750") + labs(title = "WER")
+# # p7 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT1G11130") + labs(title = "SCRAMBLED")
+# # p8 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT5G63110") + labs(title = "HDA6")
+# # p9 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT5G63110") + labs(title = "TRY")
+# 
+# # p11 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT1G01380") + labs(title = "ETC1")
+# # p22 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT5G37800") + labs(title = "RSL1")
+# p33 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT4G33880") + labs(title = "RSL2")
+# p44 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT2G24260") + labs(title = "LRL1")
+# p55 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT4G30980") + labs(title = "LRL2")
+# p66 <- plotSmoothers(epidermal_tradeseq, counts, gene = "AT5G58010") + labs(title = "LRL3")
+# 
+# 
+# (p2+p6+p33)/(p44+p55+p66)
+```
+
+Cluster genes to find ones with similar expression patterns as known regulators GLABRA2 (AT1G79840), LRL1/2 (AT2G24260, AT4G30980) and RSL2/LRL3 (AT4G33880, AT5G58010)
+
+```{r}
+pseudot_association <- associationTest(epidermal_tradeseq, lineages = TRUE)
+signif_pseudot_association <- pseudot_association %>% filter(pvalue < 0.01)
+```
+
+We will compare trichoblast and atrichoblast lineages first to keep things simple (corresponds to lineages 1 and 2). Find genes whose behaviour changes signif as a function of pseudotime. 
+
+```{r}trich.signif.genes <- pseudot_association %>% filter(pvalue_1 < 0.01) %>% rownames_to_column("ID") %>% pull(ID)
+atrich.signif.genes <- pseudot_association %>% filter(pvalue_2 < 0.01) %>% rownames_to_column("ID") %>% pull(ID)
+pseudo.signif.genes <- intersect(trich.signif.genes, atrich.signif.genes)
+```
+
+DO TONIGHT. 
+
+```{r}
+nPointsClus <- 50
+clusPat <- clusterExpressionPatterns(epidermal_tradeseq, nPoints = nPointsClus,
+                                     genes = pseudo.signif.genes, ncores = 20)
+saveRDS(clusPat, file = "../intermediate_files/tradeseq_cluspat.rds")
+```
+
+Make preliminary heatmap
+
+```{r}
+yhatSmooth <- predictSmooth(epidermal_tradeseq, gene = pseudo.signif.genes, nPoints = 30, tidy = FALSE)
+
+heatSmoothTrichoblast <- pheatmap(t(scale(t(yhatSmooth[, 1:30]))),
+                       cluster_cols = FALSE,
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, main = "Trichoblast lineage", cutree_rows = 9)
+
+heatSmoothAtrichoblast <- pheatmap(t(scale(t(yhatSmooth[, 31:60]))),
+                       cluster_cols = FALSE,
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, main = "Atrichoblast lineage", cutree_rows = 10)
+
+heatSmoothCortex <- pheatmap(t(scale(t(yhatSmooth[, 61:90]))),
+                       cluster_cols = FALSE,
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, main = "Cortex lineage")
+
+p1 <- as.ggplot(heatSmoothTrichoblast)
+p2 <- as.ggplot(heatSmoothAtrichoblast)
+p3 <- as.ggplot(heatSmoothCortex)
+
+p1 + p2
+```
+
+```{r}
+#extract clusters
+
+trich_modules <- data.frame(cutree(heatSmoothTrichoblast$tree_row, k = 9)) 
+colnames(trich_modules) <- "cluster"
+atrich_modules <- data.frame(cutree(heatSmoothAtrichoblast$tree_row, k = 10))
+colnames(atrich_modules) <- "cluster"
+cortex_modules <- data.frame(cutree(heatSmoothCortex$tree_row, k = 7))
+colnames(cortex_modules) <- "cluster"
+```
+
+```{r}
+#Find modules containing known GLABRA pathway genes and plot
+
+glabra_pathway_genes <- c("AT1G79840", "AT5G14750", "AT4G33880", "AT2G24260", "AT4G30980", "AT5G58010")
+glabra_modules_trich <- unique(trich_modules[which(rownames(trich_modules) %in% glabra_pathway_genes), ])
+glabra_modules_atrich <- unique(atrich_modules[which(rownames(atrich_modules) %in% glabra_pathway_genes), ])
+
+dat_trich <- as.data.frame(t(scale(t(yhatSmooth[, 1:30]))))
+colnames(dat_trich) <- seq_along(colnames(dat_trich))
+dat_atrich <- as.data.frame(t(scale(t(yhatSmooth[, 31:60]))))
+colnames(dat_atrich) <- seq_along(colnames(dat_atrich))
+
+
+select_trich <- trich_modules %>% filter(cluster %in% glabra_modules_trich)
+select_atrich <- trich_modules %>% filter(cluster %in% glabra_modules_trich)
+```
+
+```{r}
+p1data <- dat_trich %>% 
+  rownames_to_column("ID") %>%
+  pivot_longer(cols = -ID, names_to = "latent_time", values_to = "expression", ) %>%
+  mutate(latent_time = as.numeric(latent_time)) %>%
+  mutate(cluster = trich_modules[ID, ])
+
+p1 <- p1data %>% 
+  ggplot(aes(x = latent_time, y = expression, group = ID)) + geom_line(size = 0.1) + facet_wrap(~cluster, scales = "free_y") + theme_classic()
+```
+
+
+```{r}
+p2data <- dat_atrich %>% 
+  rownames_to_column("ID") %>%
+  pivot_longer(cols = -ID, names_to = "latent_time", values_to = "expression", ) %>%
+  mutate(latent_time = as.numeric(latent_time)) %>%
+  mutate(cluster = atrich_modules[ID, ])
+
+p2 <- p2data %>%
+  ggplot(aes(x = latent_time, y = expression)) + geom_line(size = 0.1, aes(group = ID)) + facet_wrap(~cluster, scales = "free_y") + theme_classic()
+```
+
+Filter AT2G04025 because it is so highly expressed in the beginning that it dominates other signals. Interestingly is a RGF protein 
+
+```{r}
+p1
+p2
+
+setwd("/home/wadho/master-1-project/figures/")
+ggsave(plot = p1, filename  = "tradeseq_trich_expat.png")
+ggsave(plot = p2, filename = "tradeseq_atrich_expat.png")
+```
+
+
+# ```{r}
+# p1data[order(p1data$expression, decreasing = TRUE),] %>% filter(cluster == "1") %>% slice_head(n = 10) %>% pull(ID) %>% unique()
+# ```
+
+# ```{r}
+# p2data[order(p2data$expression, decreasing = TRUE),] %>% filter(cluster %in% c("5")) %>% slice_head(n = 10) %>% pull(ID) %>% unique()
+# ```
+
+Try to find the point at which the two lineages diverge. Before the bifurcation of the lineages cells should be undecided between lineages, so their assignment to either lineage should in theory approach 50/50. As the lineages diverge, the cells will "commit" to one lineage, so maybe we can use this "commitment" to one lineage or the other as a measure for bifurcation. Define the "bifurcation coefficient" (term is arbitrary) as the point at which the increase in commitment to that lineage is maximal. 
+
+```{r}
+# get curve data
+
+curvedata <- slingCurves(epidermal_sds)
+pseudotimedata <- slingPseudotime(epidermal_sds)
+
+# use trichoblast lineage as example
+
+trich_commitment <- as.data.frame(curvedata$curve1$w) %>% rownames_to_column("cell")
+colnames(trich_commitment) <- c("cell", "commitment")
+trich_pseudotime <- as.data.frame(pseudotimedata[, 1]) %>% rownames_to_column("cell")
+colnames(trich_pseudotime) <- c("cell", "latent_time")
+
+trich_merged <- merge(trich_commitment, trich_pseudotime, by = "cell") %>% ZeroIfNA()
+trich_merged <- trich_merged[order(trich_merged$latent_time), ]
+
+l <- max(trich_pseudotime$latent_time, na.rm = TRUE)
+
+# fit smoothing spline to commitment cumulative function
+y <- smooth.spline(y = cumsum(trich_merged$commitment), x = (trich_merged$latent_time)*(30/l))
+ypred <- predict(y, seq(0, 30, length = 1000), deriv = 0)
+dypred <- predict(y, seq(0, 30, length = 1000), deriv = 1)
+
+p4 <- ggplot(data = data.frame(ypred), (aes(x = x, y = y))) + geom_smooth() + theme_classic() + labs(x = "Latent time", y = "Bifurcation coefficient") + theme(axis.text.y=element_blank(), axis.ticks.y = element_blank())
+p5 <- ggplot(data = data.frame(dypred), (aes(x = x, y = y))) + geom_smooth() + theme_classic() + labs(x = "Latent time", y = "Bifurcation coefficient") + theme(axis.text.y=element_blank(), axis.ticks.y = element_blank())
+
+p4
+p5
+```
+
+```{r}
+p4+p5
+```
+
+Try to add this as metadata to the heatmap
+
+```{r}
+# get bifurcation metadata
+
+tmp <- data.frame(dypred) %>% mutate(x = round(x))
+tmp <- data.frame(t(sapply(split(tmp, tmp$x, drop = F), colMeans)))
+
+# get ploidy metadata from seurat object
+
+ploidy_tmp <- epidermal_lineage[["ploidy.ID.P"]] %>% rownames_to_column("cell")
+ploidy_meta <- trich_merged %>% select(-commitment) %>% merge(ploidy_tmp, by = "cell") %>% mutate(latent_time = round(latent_time*(30/l)))
+ploidy_meta <- sapply(split(ploidy_meta, ploidy_meta$latent_time, drop = F), function(x){names(which.max(table(x$ploidy.ID.P)))})
+
+meta <- data.frame(tmp$y[-1], paste0("C", str_match(pattern = "(\\d+)C", ploidy_meta)[-1, 2]))
+rownames(meta) <- colnames(yhatSmooth[, 1:30])
+colnames(meta) <- c("Bifurcation score", "Ploidy")
+
+colors <- list(Ploidy = c(C2 = "#DCEDC8", C4 = "#42B3D5", C8 = "#FDEA6F", C16 = "#CF4F29"))
+
+heatSmoothTrichoblast <- pheatmap(t(scale(t(yhatSmooth[, 1:30]))),
+                       cluster_cols = FALSE,
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, 
+                       color = magma(100), 
+                       annotation_col = meta,
+                       annotation_colors = colors,
+                       main = "Trichoblast lineage", 
+                       cutree_rows = 9)
+```
+
+Do same for other lineages
+
+```{r}
+atrich_commitment <- as.data.frame(curvedata$curve2$w) %>% rownames_to_column("cell")
+colnames(atrich_commitment) <- c("cell", "commitment")
+atrich_pseudotime <- as.data.frame(pseudotimedata[, 2]) %>% rownames_to_column("cell")
+colnames(atrich_pseudotime) <- c("cell", "latent_time")
+
+atrich_merged <- merge(atrich_commitment, atrich_pseudotime, by = "cell") %>% ZeroIfNA()
+atrich_merged <- atrich_merged[order(atrich_merged$latent_time), ]
+
+l <- max(atrich_merged$latent_time, na.rm = TRUE)
+
+# fit smoothing spline to commitment cumulative function
+y <- smooth.spline(y = cumsum(atrich_merged$commitment), x = (atrich_merged$latent_time)*(30/l))
+ypred <- predict(y, seq(0, 30, length = 1000), deriv = 0)
+dypred <- predict(y, seq(0, 30, length = 1000), deriv = 1)
+```
+
+```{r}
+# get bifurcation metadata
+
+tmp <- data.frame(dypred) %>% mutate(x = round(x))
+tmp <- data.frame(t(sapply(split(tmp, tmp$x, drop = F), colMeans)))
+
+# get ploidy metadata from seurat object
+
+ploidy_tmp <- epidermal_lineage[["ploidy.ID.P"]] %>% rownames_to_column("cell")
+ploidy_meta <- atrich_merged %>% select(-commitment) %>% merge(ploidy_tmp, by = "cell") %>% mutate(latent_time = round(latent_time*(30/l)))
+ploidy_meta <- sapply(split(ploidy_meta, ploidy_meta$latent_time, drop = F), function(x){names(which.max(table(x$ploidy.ID.P)))})
+
+meta <- data.frame(tmp$y[-1], paste0("C", str_match(pattern = "(\\d+)C", ploidy_meta)[-1, 2]))
+rownames(meta) <- colnames(yhatSmooth[, 31:60])
+colnames(meta) <- c("Bifurcation score", "Ploidy")
+
+colors <- list(Ploidy = c(C2 = "#DCEDC8", C4 = "#42B3D5", C8 = "#FDEA6F", C16 = "#CF4F29"))
+
+heatSmoothAtrichoblast <- pheatmap(t(scale(t(yhatSmooth[, 31:60]))),
+                       cluster_cols = FALSE,
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, 
+                       color = magma(100), 
+                       annotation_col = meta,
+                       annotation_colors = colors,
+                       main = "Atrichoblast lineage", 
+                       cutree_rows = 9)
+
+p4 <- ggplot(data = data.frame(ypred), (aes(x = x, y = y))) + geom_smooth() + theme_classic() + labs(x = "Latent time", y = "Bifurcation coefficient") + theme(axis.text.y=element_blank(), axis.ticks.y = element_blank())
+p5 <- ggplot(data = data.frame(dypred), (aes(x = x, y = y))) + geom_smooth() + theme_classic() + labs(x = "Latent time", y = "Bifurcation coefficient") + theme(axis.text.y=element_blank(), axis.ticks.y = element_blank())
+
+p4
+p5
+```
+
+```{r}
+atrich_commitment <- as.data.frame(curvedata$curve2$w) %>% rownames_to_column("cell")
+colnames(atrich_commitment) <- c("cell", "commitment")
+atrich_pseudotime <- as.data.frame(pseudotimedata[, 2]) %>% rownames_to_column("cell")
+colnames(atrich_pseudotime) <- c("cell", "latent_time")
+
+atrich_merged <- merge(atrich_commitment, atrich_pseudotime, by = "cell") %>% ZeroIfNA()
+atrich_merged <- atrich_merged[order(atrich_merged$latent_time), ]
+
+l <- max(pseudotimedata[, 4], na.rm = TRUE)
+
+# fit smoothing spline to commitment cumulative function
+y <- smooth.spline(y = cumsum(atrich_merged$commitment), x = (atrich_merged$latent_time)*(30/l))
+ypred <- predict(y, seq(0, 30, length = 1000), deriv = 0)
+dypred <- predict(y, seq(0, 30, length = 1000), deriv = 1)
+```
+
+```{r}
+# get bifurcation metadata
+
+tmp <- data.frame(dypred) %>% mutate(x = round(x))
+tmp <- data.frame(t(sapply(split(tmp, tmp$x, drop = F), colMeans)))
+
+# get ploidy metadata from seurat object
+
+ploidy_tmp <- epidermal_lineage[["ploidy.ID.P"]] %>% rownames_to_column("cell")
+ploidy_meta <- atrich_merged %>% select(-commitment) %>% merge(ploidy_tmp, by = "cell") %>% mutate(latent_time = round(latent_time*(30/l)))
+ploidy_meta <- sapply(split(ploidy_meta, ploidy_meta$latent_time, drop = F), function(x){names(which.max(table(x$ploidy.ID.P)))})
+
+meta <- data.frame(tmp$y, paste0("C", str_match(pattern = "(\\d+)C", ploidy_meta)[, 2]))
+rownames(meta) <- colnames(yhatSmooth[, 91:120])
+colnames(meta) <- c("Bifurcation score", "Ploidy")
+
+colors <- list(Ploidy = c(C2 = "#DCEDC8", C4 = "#42B3D5", C8 = "#FDEA6F", C16 = "#CF4F29"))
+
+heatSmoothCortex <- pheatmap(t(scale(t(yhatSmooth[, 91:120]))),
+                       cluster_cols = FALSE,
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, 
+                       color = magma(100),
+                       main = "Cortex lineage", 
+                       cutree_rows = 7)
+
+p4 <- ggplot(data = data.frame(ypred), (aes(x = x, y = y))) + geom_smooth() + theme_classic() + labs(x = "Latent time", y = "Bifurcation coefficient") + theme(axis.text.y=element_blank(), axis.ticks.y = element_blank())
+p5 <- ggplot(data = data.frame(dypred), (aes(x = x, y = y))) + geom_smooth() + theme_classic() + labs(x = "Latent time", y = "Bifurcation coefficient") + theme(axis.text.y=element_blank(), axis.ticks.y = element_blank())
+
+p4
+p5
+```
+
+
+`

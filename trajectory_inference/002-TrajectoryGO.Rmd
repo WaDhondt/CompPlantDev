@@ -1,0 +1,292 @@
+---
+title: "GO enrichment on expression clusters"
+output: html_notebook
+---
+
+```{r}
+library("Seurat")
+library("SeuratDisk")
+library("SingleCellExperiment")
+library("slingshot")
+library("tidyverse")
+library("RColorBrewer")
+library("ggplotify")
+library("patchwork")
+library("goseq")
+library("PlantPhoneDB")
+library("dtw")
+```
+
+# GO enrichment
+
+
+```{r}
+countbias <- rowMeans(epidermal_lineage) %>% data.frame()
+rownames(countbias) <- rownames(epidermal_lineage)
+countbias <- rowMeans(epidermal_lineage) %>% data.frame()
+rownames(countbias) <- rownames(epidermal_lineage)
+countbias <- countbias[rownames(countbias) %in% assayed.genes, ]
+```
+
+
+```{r}
+library("biomaRt")
+listMarts(host="plants.ensembl.org")
+listDatasets(useMart(biomart="plants_mart",host="plants.ensembl.org"))
+ensembl <- useMart(biomart="plants_mart", host="plants.ensembl.org", dataset = "athaliana_eg_gene")
+groups <- getBM(attributes=c("go_id", "name_1006", "namespace_1003", "ensembl_gene_id"), filters="ensembl_gene_id",value=assayed.genes,mart=ensembl)
+groups_bp <- groups %>% filter(groups$namespace_1003 == "biological_process")
+head(groups_bp)
+```
+
+
+```{r}
+library(biomartr)
+GO_tbl <- getGO(organism = "Arabidopsis thaliana", 
+                genes    = assayed.genes,
+                filters  = c("ensembl_gene_id"))
+
+```
+
+
+```{r}
+patGO <- function(ClusterGenes, countbias, getgo, pval){
+  results <- list()
+  assayed.genes <- rownames(ClusterGenes)
+  for (c in 1:length(unique(ClusterGenes$cluster))){
+    print(paste0("Calculating cluster", c))
+    de.genes <- ClusterGenes %>% filter(cluster == c) %>% rownames()
+    gene.vector <- as.integer(assayed.genes %in% de.genes)
+    names(gene.vector) <- assayed.genes
+    pwf=nullp(gene.vector,"Arabidopsis", bias.data = countbias, plot.fit = F)
+    go.nobias <- suppressWarnings(goseq(pwf, gene2cat=getgo, method = "Hypergeometric"))
+    go.nobias$over_represented_qvalue <- 
+      p.adjust(go.nobias$over_represented_pvalue, method="BH")
+    results[[c]] <- go.nobias
+    print(paste0("Added cluster", c))
+  }
+  results <- enframe(results) %>%
+   unnest() %>% filter(over_represented_qvalue < pval)
+  results
+}
+
+trich_GO <- patGO(trich_modules, countbias, groups_bp, 0.05)
+View(trich_GO)
+
+atrich_GO <- patGO(atrich_modules, countbias, groups_bp, 0.05)
+View(atrich_GO)
+```
+
+# Cell-cell communication
+
+```{r}
+load("../data/LR_pair_ath.RDa")
+
+Heat <- LRscore(epidermal_lineage@assays$SCT@data, LRdb=LR_pair, cluster = Idents(epidermal_lineage), min.pct = 0.1,iterations=100, method='Average')
+```
+
+```{r}
+Heat$Qvalue <- (p.adjust(Heat$Pvalue, "fdr"))
+Heat <- Heat[order(Heat$Qvalue, decreasing=FALSE),]
+phoneDB_top <- Heat[Heat$Qvalue < 0.01,]
+```
+
+
+```{r}
+interaction_count <- phoneDB_top %>%
+    group_by(Ligands_cell,Receptors_cell) %>%
+    summarise(Number=n(),.groups = 'drop')
+```
+
+```{r}
+interaction_count %>%
+    mutate(Type=ifelse(Ligands_cell==Receptors_cell,"Autocrine","Paracrine")) %>%
+    group_by(Type) %>%
+    summarise(Number=sum(Number))
+```
+
+```{r}
+Autocrine <- data.frame(interaction_count[interaction_count$Ligands_cell==interaction_count$Receptors_cell,])
+Paracrine <- data.frame(interaction_count[interaction_count$Ligands_cell!=interaction_count$Receptors_cell,])
+```
+
+```{r}
+mycolor <- c("green","purple","lightblue")
+```
+
+```{r}
+chordDiagram(Paracrine, col = brewer.pal(n = 12, "Set3"))
+chordDiagram(Autocrine, col = brewer.pal(n = 12, "Set3"))
+```
+
+```{r}
+CCI_network(Paracrine, mycolor)
+```
+
+```{r}
+options(repr.plot.width=6, repr.plot.height=5)
+heatmap_count(interaction_count,text_size=7.82,number_size=3,decimal=4,title="")
+```
+
+```{r}
+Top20 <- phoneDB_top %>%
+    arrange(desc(Score)) %>%
+    select(LR_pair) %>%
+    unique() %>%
+    head(20) %>%
+    inner_join(Heat) %>%
+    select(LR_pair,Cell_pair,Score) %>%
+    spread(.,Cell_pair,Score) %>%
+    replace(is.na(.), 0)
+```
+
+```{r}
+rownames(Top20) <- Top20$LR_pair
+Top20 <- Top20[,-1]
+Top20 <- t(Top20)
+```
+
+```{r}
+Top20 <- apply(Top20,2,function(x){x/max(x)})
+```
+
+```{r}
+options(repr.plot.width=5, repr.plot.height=10)
+pheatmap(Top20, scale="none",angle_col=45,fontsize_row=6,
+         cluster_rows = T,cluster_cols = F,show_colnames=T)
+```
+
+```{r}
+library(dendextend)
+yhatSmooth <- predictSmooth(epidermal_tradeseq, gene = pseudo.signif.genes, nPoints = 50, tidy = TRUE) %>%
+  mutate(lineage = paste0("Lineage", lineage)) %>%
+  group_by(lineage) %>%
+  group_split() %>%
+  lapply(function(x){pivot_wider(select(x, -c("lineage")), names_from = "time", values_from = "yhat")})
+
+lineages <- slingLineages(epidermal_sds)
+
+tmp <- phoneDB_top %>% 
+  arrange(desc(Score)) %>% 
+  select(Ligands, Receptors, Ligands_cell, Receptors_cell, LR_pair, Cell_pair) %>% 
+  filter(Ligands_cell != "Meristematic 2" & Receptors_cell != "Meristematic 2") %>% filter(Ligands_cell != Receptors_cell) %>%
+  mutate(LR_pair  = make.names(names = LR_pair, unique = TRUE))
+
+for (line in names(lineages)){
+  new_lig <- replace(tmp$Ligands_cell, which(tmp$Ligands_cell %in% lineages[[line]]), line)
+  new_rec <- replace(tmp$Receptors_cell, which(tmp$Receptors_cell %in% lineages[[line]]), line)
+  tmp$Ligands_cell <- new_lig
+  tmp$Receptors_cell <- new_rec
+}
+
+tmp <- distinct(tmp, Ligands, Receptors, Ligands_cell, Receptors_cell, .keep_all = TRUE)
+
+# first do for ligand data
+lig <- tmp %>% 
+  rename("gene" = "Ligands") %>%
+  group_by(Ligands_cell) %>% group_split() %>% 
+  lapply(function(x){select(x, -c("Ligands_cell", "Receptors", "Receptors_cell", "Cell_pair"))})
+
+
+# do same for receptor data
+rec <- tmp %>% 
+  rename("gene" = "Receptors") %>%
+  group_by(Receptors_cell) %>% group_split() %>% 
+  lapply(function(x){select(x, -c("Ligands", "Ligands_cell", "Receptors_cell", "Cell_pair"))})
+  
+ligand_time <- list()
+receptor_time <- list()
+for(i in c(1, 2, 4)){
+  new_lig <- merge(yhatSmooth[[i]], lig[[i]], by = "gene")
+  new_rec <- merge(yhatSmooth[[i]], rec[[i]], by = "gene")
+  names(new_lig) <- c("gene", 1:50, "pair")
+  names(new_rec) <- c("gene", 1:50, "pair")
+  ligand_time[[i]] <- new_lig 
+  receptor_time[[i]] <- new_rec
+}
+
+ligand_time <- do.call(rbind, ligand_time)
+receptor_time <- do.call(rbind, receptor_time)
+
+ligand_time <- ligand_time[ligand_time$pair %in% receptor_time$pair, ]
+receptor_time <- receptor_time[receptor_time$pair %in% ligand_time$pair, ]
+```
+
+```{r}
+# # get levels of lineage combinations
+# z <- tmp[tmp$LR_pair %in% labels(ligand_tree), c("Ligands_cell", "Receptors_cell")]
+# lev <- apply(unique(z), 1, function(x){paste(x[1], x[2], sep = "_")})
+# palette <- c(brewer.pal(n = 4, "Greens"), brewer.pal(n = 4, "Oranges"), brewer.pal(n = 4, "Blues"), brewer.pal(n = 4, "PuRd"))
+# names(palette) <- lev
+# colors <- tmp[tmp$LR_pair %in% labels(ligand_tree), c("Ligands_cell", "Receptors_cell")] %>%
+#   apply(1, function(x){paste(x[1], x[2], sep = "_")}) %>%
+#   str_replace_all(palette)
+```
+
+```{r}
+palette <- c(Lineage1_Lineage4 = "#66C2A5", Lineage4_Lineage1 = "#66C2A5", Lineage1_Lineage3 = "#D3D3D3", Lineage3_Lineage1 = "#D3D3D3", Lineage1_Lineage2 = "#8DA0CB", Lineage2_Lineage1 = "#8DA0CB", Lineage2_Lineage4 = "#E78AC3", Lineage4_Lineage2 = "#E78AC3", Lineage1_Lineage1 = "#A6D854", Lineage2_Lineage3 = "#D3D3D3", Lineage3_Lineage2 = "#D3D3D3", Lineage3_Lineage4 = "#D3D3D3", Lineage4_Lineage3 = "#D3D3D3")
+```
+
+## Tanglegram
+
+```{r}
+# hierarchical clustering with pairwise DTW distances
+ligand_tree <- t(scale(t(ligand_time %>% select(-c("gene", "pair"))))) %>% 
+  dist(method = "dtw") %>% 
+  hclust() %>% 
+  as.dendrogram()
+
+receptor_tree <- t(scale(t(receptor_time %>% select(-c("gene", "pair"))))) %>% 
+  dist(method = "dtw") %>% 
+  hclust() %>% 
+  as.dendrogram()
+
+ligand_backup <- ligand_tree
+receptor_backup <- receptor_tree
+```
+
+
+```{r fig.height=15}
+labels(ligand_tree) <- ligand_time[labels(ligand_tree), "pair"]
+labels(receptor_tree) <- receptor_time[labels(receptor_tree), "pair"]
+
+colors <- tmp[tmp$LR_pair %in% labels(ligand_tree), c("Ligands_cell", "Receptors_cell")] %>%
+   apply(1, function(x){paste(x[1], x[2], sep = "_")}) %>%
+   str_replace_all(palette)
+
+set.seed(1234)
+p <- dendlist(ligand_tree, receptor_tree) %>% 
+  untangle(method = "random", R=5) %>%
+  untangle(method = "step2")
+
+tanglegram(p, faster = TRUE, main_left = "Ligands", main_right = "Receptors", lwd=1, color = colors, common_subtrees_color_branches=TRUE)
+```
+
+## Heatmap
+
+Calculate correlations in expression pattern between interacting proteins
+
+```{r}
+a <- ligand_time %>% select(-c("gene", "pair")) %>% t() %>% scale() %>% data.frame()
+b <- receptor_time %>% select(-c("gene", "pair")) %>% t() %>% scale() %>% data.frame()
+
+colnames(a) <- ligand_time$gene
+colnames(b) <- receptor_time$gene
+
+c <- proxy::dist(a, b, method = "dtw", by_rows = FALSE)
+
+z <- split(data.frame(tmp$Ligands, tmp$Receptors, tmp$LR_pair), tmp$Ligands) %>% lapply(function(x){x$tmp.Receptors})
+
+interaction_heat <- pheatmap(c)
+```
+
+```{r}
+row_meta <- tmp[tmp$LR_pair %in% rownames(c), ] %>% select(LR_pair, Ligands_cell, Receptors_cell) %>% mutate(new = paste0(Ligands_cell, Receptors_cell)) %>% select(new, LR_pair)
+col_meta <- tmp[tmp$LR_pair %in% colnames(c), ] %>% select(LR_pair, Ligands_cell, Receptors_cell) %>% mutate(new = paste0(Ligands_cell, Receptors_cell)) %>% select(new, LR_pair)
+
+rownames(row_meta) <- row_meta$LR_pair
+rownames(col_meta) <- col_meta$LR_pair
+```
+
+
+
