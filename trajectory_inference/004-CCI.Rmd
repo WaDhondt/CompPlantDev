@@ -1,0 +1,405 @@
+---
+title: "CCI"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(PlantPhoneDB)
+library(ComplexHeatmap)
+library(tidyverse)
+library(tradeSeq)
+```
+
+
+# Cell-cell communication
+
+## Static
+
+```{r}
+load("../data/LR_pair_ath.RDa")
+
+Heat <-
+  LRscore(
+    epidermal_lineage@assays$SCT@data,
+    LRdb = LR_pair,
+    cluster = Idents(epidermal_lineage),
+    min.pct = 0.1,
+    iterations = 100,
+    method = 'Average'
+  )
+```
+
+
+```{r}
+Heat$Qvalue <- (p.adjust(Heat$Pvalue, "fdr"))
+Heat <- Heat[order(Heat$Qvalue, decreasing = FALSE), ]
+phoneDB_top <- Heat[Heat$Qvalue < 0.01, ]
+```
+
+
+```{r}
+interaction_count <- phoneDB_top %>%
+  group_by(Ligands_cell, Receptors_cell) %>%
+  summarise(Number = n(), .groups = 'drop')
+```
+
+```{r}
+interaction_count %>%
+  mutate(Type = ifelse(Ligands_cell == Receptors_cell, "Autocrine", "Paracrine")) %>%
+  group_by(Type) %>%
+  summarise(Number = sum(Number))
+```
+
+```{r}
+Autocrine <-
+  data.frame(interaction_count[interaction_count$Ligands_cell == interaction_count$Receptors_cell, ])
+Paracrine <-
+  data.frame(interaction_count[interaction_count$Ligands_cell != interaction_count$Receptors_cell, ])
+```
+
+```{r}
+mycolor <- c("green","purple","lightblue")
+```
+
+```{r}
+chordDiagram(Paracrine, col = brewer.pal(n = 12, "Set3"))
+chordDiagram(Autocrine, col = brewer.pal(n = 12, "Set3"))
+```
+
+```{r}
+CCI_network(Paracrine, mycolor)
+```
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 5)
+heatmap_count(
+  interaction_count,
+  text_size = 7.82,
+  number_size = 3,
+  decimal = 4,
+  title = ""
+)
+```
+
+```{r}
+Top20 <- phoneDB_top %>%
+    arrange(desc(Score)) %>%
+    select(LR_pair) %>%
+    unique() %>%
+    head(20) %>%
+    inner_join(Heat) %>%
+    select(LR_pair,Cell_pair,Score) %>%
+    spread(.,Cell_pair,Score) %>%
+    replace(is.na(.), 0)
+```
+
+```{r}
+rownames(Top20) <- Top20$LR_pair
+Top20 <- Top20[,-1]
+Top20 <- t(Top20)
+```
+
+```{r}
+Top20 <- apply(Top20,2,function(x){x/max(x)})
+```
+
+```{r}
+options(repr.plot.width=5, repr.plot.height=10)
+pheatmap(Top20, scale="none",angle_col=45,fontsize_row=6,
+         cluster_rows = T,cluster_cols = F,show_colnames=T)
+```
+
+## Dynamic
+
+
+```{r}
+# get pseudotime smoother per gene
+yhatSmooth <-
+  predictSmooth(
+    epidermal_tradeseq,
+    gene = pseudo.signif.genes,
+    nPoints = 30,
+    tidy = TRUE
+  ) %>%
+  mutate(lineage = paste0("Lineage", lineage)) %>%
+  group_by(lineage) %>%
+  group_split() %>%
+  lapply(function(x) {
+    pivot_wider(select(x,-c("lineage")),
+                names_from = "time",
+                values_from = "yhat")
+  })
+
+lineages <- slingLineages(epidermal_sds)
+
+# make unique names for interacting LR pairs
+tmp <- phoneDB_top %>%
+  arrange(desc(Score)) %>%
+  select(Ligands,
+         Receptors,
+         Ligands_cell,
+         Receptors_cell,
+         LR_pair,
+         Cell_pair) %>%
+  filter(
+    Ligands_cell %in% c(
+      "Cortex 1",
+      "Cortex 2",
+      "Atrichoblast 1",
+      "Atrichoblast 2",
+      "Trichoblast 1",
+      "Trichoblast 2"
+    ) &
+      Receptors_cell %in% c(
+        "Cortex 1",
+        "Cortex 2",
+        "Atrichoblast 1",
+        "Atrichoblast 2",
+        "Trichoblast 1",
+        "Trichoblast 2"
+      )
+  ) %>% filter(Ligands_cell != Receptors_cell) %>%
+  mutate(LR_pair  = make.names(names = LR_pair, unique = TRUE))
+
+# add lineage information for ligands and receptors
+for (line in names(lineages)) {
+  new_lig <-
+    replace(tmp$Ligands_cell,
+            which(tmp$Ligands_cell %in% lineages[[line]]),
+            line)
+  new_rec <-
+    replace(tmp$Receptors_cell,
+            which(tmp$Receptors_cell %in% lineages[[line]]),
+            line)
+  tmp$Ligands_cell <- new_lig
+  tmp$Receptors_cell <- new_rec
+}
+
+tmp <-
+  distinct(tmp,
+           Ligands,
+           Receptors,
+           Ligands_cell,
+           Receptors_cell,
+           .keep_all = TRUE)
+
+# first do for ligand data
+lig <- tmp %>%
+  rename("Ligands" = "gene") %>%
+  group_by(Ligands_cell) %>% group_split() %>%
+  lapply(function(x) {
+    select(x,
+           -c("Receptors", "Cell_pair"))
+  })
+
+
+# do same for receptor data
+rec <- tmp %>%
+  rename("Receptors" = "gene") %>%
+  group_by(Receptors_cell) %>% group_split() %>%
+  lapply(function(x) {
+    select(x,
+           -c("Ligands", "Cell_pair"))
+  })
+
+# combine lineage information for ligand/receptor with tradeseq pseudotime smoother
+ligand_time <- list()
+receptor_time <- list()
+for (i in c(1, 2, 4)) {
+  new_lig <- merge(yhatSmooth[[i]], lig[[i]], by = "gene")
+  new_rec <- merge(yhatSmooth[[i]], rec[[i]], by = "gene")
+  names(new_lig) <- c("gene", 1:30, "Ligands_cell", "Receptors_cell", "pair")
+  names(new_rec) <- c("gene", 1:30, "Ligands_cell", "Receptors_cell", "pair")
+  ligand_time[[i]] <- new_lig
+  receptor_time[[i]] <- new_rec
+}
+
+ligand_time <- do.call(rbind, ligand_time)
+receptor_time <- do.call(rbind, receptor_time)
+
+# only keep if there is information on both members of interacting pair
+common <- intersect(ligand_time$pair, receptor_time$pair)
+ligand_time <-
+  ligand_time[ligand_time$pair %in% common,]
+receptor_time <-
+  receptor_time[receptor_time$pair %in% common,]
+```
+
+
+```{r}
+palette <-
+  c(
+    Lineage1_Lineage4 = "#66C2A5",
+    Lineage4_Lineage1 = "#006ee6",
+    Lineage1_Lineage3 = "#D3D3D3",
+    Lineage3_Lineage1 = "#D3D3D3",
+    Lineage1_Lineage2 = "#8DA0CB",
+    Lineage2_Lineage1 = "#8DA0CB",
+    Lineage2_Lineage4 = "#E78AC3",
+    Lineage4_Lineage2 = "#A020F0",
+    Lineage1_Lineage1 = "#A6D854",
+    Lineage2_Lineage3 = "#D3D3D3",
+    Lineage3_Lineage2 = "#D3D3D3",
+    Lineage3_Lineage4 = "#D3D3D3",
+    Lineage4_Lineage3 = "#D3D3D3"
+  )
+```
+
+Do first for cortex:trichoblast (lineage 4:lineage 1) interactions
+
+```{r}
+maketangle <- function(first_lineage, second_lineage, ...) {
+  # subset lineages of interest
+  print("Subsetting lineages...")
+  ligand_time_sub <-
+    ligand_time %>% filter(
+      Ligands_cell %in% c(first_lineage, second_lineage, ...),
+      Receptors_cell %in% c(first_lineage, second_lineage, ...)
+    )
+  receptor_time_sub <-
+    receptor_time %>% filter(
+      Ligands_cell %in% c(first_lineage, second_lineage, ...),
+      Receptors_cell %in% c(first_lineage, second_lineage, ...)
+    )
+  
+  
+  # hierarchical clustering with pairwise DTW distances
+  print("Calculating DTW distances")
+  ligand_tree <-
+    t(scale(t(ligand_time_sub %>%
+                select(
+                  -c("gene", "pair", "Ligands_cell", "Receptors_cell")
+                )))) %>%
+    dist(method = "dtw") %>%
+    hclust() %>%
+    as.dendrogram()
+  
+  receptor_tree <-
+    t(scale(t(receptor_time_sub %>%
+                select(
+                  -c("gene", "pair", "Ligands_cell", "Receptors_cell")
+                )))) %>%
+    dist() %>%
+    hclust() %>%
+    as.dendrogram()
+  
+  print("Plotting")
+  labels(ligand_tree) <-
+    ligand_time_sub[labels(ligand_tree), "pair"]
+  labels(receptor_tree) <-
+    receptor_time_sub[labels(receptor_tree), "pair"]
+  
+  colors <-
+    tmp[tmp$LR_pair %in% labels(ligand_tree), c("Ligands_cell", "Receptors_cell")] %>%
+    apply(1, function(x) {
+      paste(x[1], x[2], sep = "_")
+    }) %>%
+    str_replace_all(palette)
+  
+  dendlist(ligand_tree, receptor_tree) %>%
+    untangle() %>% tanglegram(
+      faster = TRUE,
+      main_left = "Ligands",
+      main_right = "Receptors",
+      color = colors,
+      common_subtrees_color_branches = TRUE,
+      lwd = 2
+    )
+}
+```
+
+```{r}
+p1 <- maketangle("Lineage1", "Lineage4")
+p2 <- maketangle("Lineage1", "Lineage2")
+p3 <- maketangle("Lineage2", "Lineage4")
+```
+
+
+### Heatmap 
+
+Calculate correlations in expression pattern between interacting proteins
+
+```{r}
+# calculate average expression for interacting pairs
+pairs_heatmapdata <- (receptor_time[, 2:31] + ligand_time[match(ligand_time$pair, receptor_time$pair), 2:31]) / 2
+rownames(pairs_heatmapdata) <- receptor_time$pair
+
+row_meta <- data.frame(label = paste0(receptor_time$Ligands_cell, receptor_time$Receptors_cell), row.names = receptor_time$pair)
+
+signalheatmap <- pheatmap(t(scale(t(pairs_heatmapdata))), cluster_cols = F, annotation_row = row_meta, show_rownames = F, cutree_rows = 8)
+```
+```{r}
+signal_modules <- data.frame(cluster = as.factor(cutree(signalheatmap$tree_row,  k = 8)))
+
+c <- sapply(rownames(signal_modules), 
+            function(x){stringr::str_extract_all(x, pattern = "AT[:digit:]G[:digit:]{5}")}) %>% do.call(rbind.data.frame, .)
+colnames(c) <- c("lig", "rec")
+
+signal_genemodules <- data.frame(cluster = rep(signal_modules$cluster, each = 2), gene = with(c, ggplot2:::interleave(lig,rec)))
+
+patGO <- function(ClusterGenes, countbias, getgo, pval) {
+  results <- list()
+  assayed.genes <- rownames(denyer@assays$SCT)
+  for (c in 1:length(unique(ClusterGenes$cluster))) {
+    print(paste0("Calculating cluster", c))
+    de.genes <- ClusterGenes %>% filter(cluster == c) %>% pull(gene)
+    gene.vector <- as.integer(assayed.genes %in% de.genes)
+    names(gene.vector) <- assayed.genes
+    pwf = nullp(gene.vector,
+                "Arabidopsis",
+                bias.data = countbias,
+                plot.fit = F)
+    go.nobias <-
+      suppressWarnings(goseq(pwf, gene2cat = getgo, method = "Hypergeometric"))
+    go.nobias$over_represented_qvalue <-
+      p.adjust(go.nobias$over_represented_pvalue, method = "BH")
+    results[[c]] <- go.nobias
+    print(paste0("Added cluster", c))
+  }
+  results <- enframe(results) %>%
+    unnest() %>% filter(over_represented_qvalue < pval)
+  results
+}
+```
+
+```{r}
+signalGO <- patGO(signal_genemodules, countbias = countbias, getgo = groups_bp, pval = 0.05)
+```
+
+```{r fig.width=12, fig.height=8}
+c <-
+  signalGO %>% dplyr::select(name, category, term, over_represented_qvalue) %>% 
+  distinct(name, term, .keep_all = T) %>%
+  mutate(over_represented_qvalue = signif(over_represented_qvalue, digits = 2)) %>%
+  mutate(text = paste(term, paste0("(", over_represented_qvalue, ")"))) %>% 
+  mutate(fontsize = 9) %>%
+  split(signalGO$name) %>%
+  lapply(function(x){data.frame(text = x$text, fontsize = x$fontsize)})
+  
+Heatmap(t(scale(t(pairs_heatmapdata))),
+        column_dend_reorder = FALSE,
+        cluster_columns = FALSE, 
+        show_column_names = FALSE, 
+        row_split = signal_modules,
+        show_row_names = FALSE,
+        border = TRUE, 
+        right_annotation = rowAnnotation(
+          textbox = anno_textbox(signal_modules$cluster, c, word_wrap = TRUE, add_new_line = TRUE)), 
+        width = unit(15, "cm")
+  )
+```
+
+
+
+
+
+
+
+
+
+
+
