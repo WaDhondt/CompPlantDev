@@ -189,7 +189,7 @@ tmp <-
 
 # first do for ligand data
 lig <- tmp %>%
-  rename("Ligands" = "gene") %>%
+  rename("gene" = "Ligands") %>%
   group_by(Ligands_cell) %>% group_split() %>%
   lapply(function(x) {
     select(x,
@@ -199,7 +199,7 @@ lig <- tmp %>%
 
 # do same for receptor data
 rec <- tmp %>%
-  rename("Receptors" = "gene") %>%
+  rename("gene" = "Receptors") %>%
   group_by(Receptors_cell) %>% group_split() %>%
   lapply(function(x) {
     select(x,
@@ -330,17 +330,24 @@ rownames(pairs_heatmapdata) <- receptor_time$pair
 
 row_meta <- data.frame(label = paste0(receptor_time$Ligands_cell, receptor_time$Receptors_cell), row.names = receptor_time$pair)
 
-signalheatmap <- pheatmap(t(scale(t(pairs_heatmapdata))), cluster_cols = F, annotation_row = row_meta, show_rownames = F, cutree_rows = 8)
+signalheatmap <- pheatmap::pheatmap(t(scale(t(pairs_heatmapdata))), cluster_cols = F, annotation_row = row_meta, show_rownames = F, clustering_method = "ward.D", cutree_row = 6)
 ```
+
+
 ```{r}
-signal_modules <- data.frame(cluster = as.factor(cutree(signalheatmap$tree_row,  k = 8)))
+signal_modules <- data.frame(cluster = as.factor(cutree(signalheatmap$tree_row,  k = 6)))
 
 c <- sapply(rownames(signal_modules), 
             function(x){stringr::str_extract_all(x, pattern = "AT[:digit:]G[:digit:]{5}")}) %>% do.call(rbind.data.frame, .)
 colnames(c) <- c("lig", "rec")
 
-signal_genemodules <- data.frame(cluster = rep(signal_modules$cluster, each = 2), gene = with(c, ggplot2:::interleave(lig,rec)))
+signal_genemodules <- data.frame(cluster = rep(signal_modules$cluster, each = 2), gene = with(c, ggplot2:::interleave(lig,rec))) %>%
+  group_by(cluster) %>% 
+  distinct(gene) %>% 
+  ungroup()
+```
 
+```{r}
 patGO <- function(ClusterGenes, countbias, getgo, pval) {
   results <- list()
   assayed.genes <- rownames(denyer@assays$SCT)
@@ -366,9 +373,11 @@ patGO <- function(ClusterGenes, countbias, getgo, pval) {
 }
 ```
 
+
 ```{r}
 signalGO <- patGO(signal_genemodules, countbias = countbias, getgo = groups_bp, pval = 0.05)
 ```
+
 
 ```{r fig.width=12, fig.height=8}
 c <-
@@ -380,7 +389,8 @@ c <-
   split(signalGO$name) %>%
   lapply(function(x){data.frame(text = x$text, fontsize = x$fontsize)})
   
-Heatmap(t(scale(t(pairs_heatmapdata))),
+pdf(file = "../figures/signalGO_heatmap.pdf", width = 14, height = 6.5)
+p <- Heatmap(t(scale(t(pairs_heatmapdata))),
         column_dend_reorder = FALSE,
         cluster_columns = FALSE, 
         show_column_names = FALSE, 
@@ -389,8 +399,12 @@ Heatmap(t(scale(t(pairs_heatmapdata))),
         border = TRUE, 
         right_annotation = rowAnnotation(
           textbox = anno_textbox(signal_modules$cluster, c, word_wrap = TRUE, add_new_line = TRUE)), 
-        width = unit(15, "cm")
+        width = unit(15, "cm"),
+        row_title = NULL, 
+        cluster_row_slices = FALSE
   )
+draw(p)
+dev.off()
 ```
 
 
