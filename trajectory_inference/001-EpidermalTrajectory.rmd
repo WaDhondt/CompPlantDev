@@ -67,7 +67,7 @@ epidermal_sce <- as.SingleCellExperiment(epidermal_lineage)
 epidermal_sce <- getLineages(reducedDims(epidermal_sce)$UMAP, 
                              clusterLabels = clustering, 
                              start.clus = "QC", 
-                             end.clus = c("Trichoblast 2", "Atrichoblast 1, Cortex 1"))
+                             end.clus = c("Trichoblast 2", "Atrichoblast 1, Cortex 2"))
 ```
 
 Get principal curves and convert to SlingshotDataset
@@ -88,7 +88,7 @@ epidermal_sds <- SlingshotDataSet(epidermal_sce)
 Plot lineages on 2D UMAP embedding. 
 
 ```{r}
-plot(epidermal_sce@reducedDim, col = brewer.pal(9,'Set1')[clustering], pch=16, asp = 1)
+plot(Embeddings(epidermal_lineage, "umap"), col = brewer.pal(9,'Set1')[clustering], pch=16, asp = 1)
 lines(epidermal_sds, lwd=2, type = 'curves', col = 'black')
 ```
 
@@ -241,7 +241,7 @@ epidermal_tradeseq <- fitGAM(counts = counts,
               sds = epidermal_sds,
               cellWeights = cellweights,
               nknots=6, verbose = TRUE)
-#saveRDS(epidermal_tradeseq, file = "../intermediate_files/epidermal_tradeseq.rds")
+saveRDS(epidermal_tradeseq, file = "./epidermal_tradeseq.rds")
 ```
 
 ```{r}
@@ -272,7 +272,7 @@ fetch gene annotation.
 
 ```{r}
 library(org.At.tair.db)
-x <- org.At.tairGENENAME
+x <- org.At.tairSYMBOL
 mapped_tairs <- mappedkeys(x)
 xx <- as.list(x[mapped_tairs])
 t <- unlist(xx) %>% as.data.frame()
