@@ -86,7 +86,7 @@ patGO <- function(ClusterGenes, countbias, getgo, pval) {
                 bias.data = countbias,
                 plot.fit = F)
     go.nobias <-
-      suppressWarnings(goseq(pwf, gene2cat = getgo, method = "Hypergeometric"))
+      suppressWarnings(goseq(pwf, gene2cat = getgo))
     go.nobias$over_represented_qvalue <-
       p.adjust(go.nobias$over_represented_pvalue, method = "BH")
     results[[c]] <- go.nobias
@@ -104,22 +104,22 @@ patGO <- function(ClusterGenes, countbias, getgo, pval) {
 yhatSmooth <- predictSmooth(epidermal_tradeseq, gene = pseudo.signif.genes, nPoints = 30, tidy = FALSE)
 
 trich_dat <- t(scale(t(yhatSmooth[, 1:30])))
-heatSmoothTrichoblast <- pheatmap(trich_dat,
+heatSmoothTrichoblast <- pheatmap::pheatmap(trich_dat,
                        cluster_cols = FALSE,
                        cluster_rows = TRUE, 
                        show_rownames = FALSE, 
-                       show_colnames = FALSE, main = "Trichoblast lineage", cutree_rows = 10)
+                       show_colnames = FALSE, main = "Trichoblast lineage", cutree_rows = 7, clustering_method = "ward.D")
 
 atrich_dat <- t(scale(t(yhatSmooth[, 31:60])))
 
-heatSmoothAtrichoblast <- pheatmap(atrich_dat,
+heatSmoothAtrichoblast <- pheatmap::pheatmap(atrich_dat,
                        cluster_cols = FALSE,
                        cluster_rows = TRUE, 
                        show_rownames = FALSE, 
-                       show_colnames = FALSE, main = "Atrichoblast lineage", cutree_rows = 10)
+                       show_colnames = FALSE, main = "Atrichoblast lineage", cutree_rows = 8, clustering_method = "ward.D")
 
 cortex_dat <- t(scale(t(yhatSmooth[, 61:90])))
-heatSmoothCortex <- pheatmap(cortex_dat,
+heatSmoothCortex <- pheatmap::pheatmap(cortex_dat,
                        cluster_cols = FALSE,
                        cluster_rows = TRUE,
                        show_rownames = FALSE, 
@@ -132,10 +132,10 @@ p3 <- as.ggplot(heatSmoothCortex)
 
 ```{r}
 trich_modules <-
-  data.frame(cluster = as.factor(cutree(heatSmoothTrichoblast$tree_row,  k = 10)))
+  data.frame(cluster = as.factor(cutree(heatSmoothTrichoblast$tree_row,  k = 7)))
 
 atrich_modules <-
-  data.frame(cluster = as.factor(cutree(heatSmoothAtrichoblast$tree_row, k = 10)))
+  data.frame(cluster = as.factor(cutree(heatSmoothAtrichoblast$tree_row, k = 8)))
 
 cortex_modules <-
   data.frame(cluster = as.factor(cutree(heatSmoothCortex$tree_row, k = 9)))
@@ -161,7 +161,7 @@ pseudotimedata <- slingPseudotime(epidermal_sds)
 # Create lineage data for plotting
 
 # trichoblast
-trich_merged <- data.frame(commitment = curvedata$curve1$w,
+trich_merged <- data.frame(commitment = curvedata$Lineage1$w,
                            latent_time = pseudotimedata[, 1]) %>%
   rownames_to_column("cell") %>%
   drop_na() %>%
@@ -170,7 +170,7 @@ trich_merged <- data.frame(commitment = curvedata$curve1$w,
 trich_l <- max(trich_merged$latent_time)
 
 # atrichoblast
-atrich_merged <- data.frame(commitment = curvedata$curve2$w, 
+atrich_merged <- data.frame(commitment = curvedata$Lineage2$w, 
                             latent_time = pseudotimedata[, 2]) %>% 
   rownames_to_column("cell") %>% 
   drop_na() %>% 
@@ -213,8 +213,8 @@ timezone_meta <- lineagedata %>%
 
 timezone_meta <- sapply(split(timezone_meta, timezone_meta$latent_time, drop = F), function(x){names(which.max(table(x$timezone.ID.P)))})
 
-meta <- data.frame(Ploidy = paste0("C", str_match(pattern = "(\\d+)C", ploidy_meta)[-1, 2]), 
-                   timezone = timezone_meta[-1], 
+meta <- data.frame(Ploidy = paste0("C", str_match(pattern = "(\\d+)C", ploidy_meta)[, 2]), 
+                   timezone = timezone_meta[], 
                    row.names = colnames(yhatSmooth[, cols]))
 }
 
@@ -239,7 +239,7 @@ heatmapGO <- function(GO, data, filename, modules, annotation_meta){
   split(GO$name) %>%
   lapply(function(x){data.frame(text = x$text, fontsize = x$fontsize)})
   
-  svglite::svglite(filename = filename, width = 14, height = 6.5)
+  pdf(file = filename, width = 14, height = 6.5)
   p <- Heatmap(data,
         column_dend_reorder = FALSE,
         cluster_columns = FALSE, 
@@ -259,14 +259,14 @@ dev.off()
 heatmapGO(
   GO = trich_GO,
   data = trich_dat,
-  filename = "../figures/trichGO_heatmap.svg",
+  filename = "../figures/trichGO_heatmap_wallenius.pdf",
   modules = trich_modules,
   annotation_meta = trich_meta
 )
 heatmapGO(
   GO = atrich_GO,
   data = atrich_dat,
-  filename = "../figures/AtrichGO_heatmap.svg",
+  filename = "../figures/AtrichGO_heatmap_wallenius.pdf",
   modules = atrich_modules,
   annotation_meta = atrich_meta
 )
