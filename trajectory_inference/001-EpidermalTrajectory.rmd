@@ -1,0 +1,337 @@
+---
+title: "Trajectory inference on epidermal lineage"
+author: "WD"
+date: "13/3/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("Seurat")
+library("SeuratDisk")
+library("SingleCellExperiment")
+library("slingshot")
+library("tidyverse")
+library("clusterExperiment")
+library("RColorBrewer")
+library("tradeSeq")
+library("epoch")
+library("ggplotify")
+library("patchwork")
+```
+
+```{r}
+denyer <- LoadH5Seurat("../intermediate_files/denyer_wt_sctransform_annotated.h5seurat")
+```
+
+# Trajectory inference on epidermal and cortex lineage cells
+
+```{r}
+identities = c(
+  "Meristematic 1",
+  "Atrichoblast 1",
+  "Atrichoblast 2",
+  "Trichoblast 1",
+  "Trichoblast 2",
+  "Meristematic 2",
+  "Cortex 1",
+  "Cortex 2", 
+  "QC"
+)
+epidermal_lineage <- denyer[, (denyer@meta.data$Brady.annotation %in% identities)]
+epidermal_lineage[["epidermal_lineage"]] <- Idents(epidermal_lineage)
+```
+
+## Get Lineage Data
+
+```{r}
+# copy object
+set.seed(1234)
+# epidermal_lineage_rerun <- RunPCA(epidermal_lineage, features = VariableFeatures(epidermal_lineage))
+
+# epidermal_lineage_rerun <- RunUMAP(epidermal_lineage, dims = 1:30)
+
+dimred <- epidermal_lineage@reductions$umap@cell.embeddings
+clustering <- epidermal_lineage$epidermal_lineage
+counts <- as.matrix(epidermal_lineage@assays$SCT@counts[epidermal_lineage@assays$SCT@var.features, ])
+```
+
+## Define cell lineages
+
+```{r}
+set.seed(1234)
+epidermal_sce <- as.SingleCellExperiment(epidermal_lineage)
+epidermal_sce <- getLineages(reducedDims(epidermal_sce)$UMAP, 
+                             clusterLabels = clustering, 
+                             start.clus = "QC", 
+                             end.clus = c("Trichoblast 2", "Atrichoblast 1, Cortex 2"))
+```
+
+Get principal curves and convert to SlingshotDataset
+
+```{r}
+epidermal_sce <-
+  getCurves(
+    epidermal_sce,
+    approx_points = 300,
+    thresh = 0.01,
+    stretch = 0.8,
+    allow.breaks = FALSE,
+    shrink = 0.99
+  )
+epidermal_sds <- SlingshotDataSet(epidermal_sce)
+```
+
+Plot lineages on 2D UMAP embedding. 
+
+```{r}
+plot(Embeddings(epidermal_lineage, "umap"), col = brewer.pal(9,'Set1')[clustering], pch=16, asp = 1)
+lines(epidermal_sds, lwd=2, type = 'curves', col = 'black')
+```
+
+Better in ggplot
+
+```{r}
+dfs <- lapply(seq_along(slingCurves(epidermal_sce)), function(l){
+    crv <- slingCurves(epidermal_sce)[[l]]
+    df <- data.frame(crv$s[crv$ord, ])
+    df$curve <- l
+    return(df)
+})
+curvedata <- do.call(rbind, dfs)
+```
+
+```{r}
+p <- data.frame(epidermal_sce@reducedDim) %>%
+  ggplot(aes(x = UMAP_1, y = UMAP_2)) + geom_point(aes(color = clustering)) + geom_path(data = data.frame(curvedata), aes(x = UMAP_1, y = UMAP_2, group = curve)) + theme_void()
+
+p
+```
+
+Color according to pseudotime and split by curve
+
+```{r}
+weights <- slingCurveWeights(epidermal_sds) %>%
+  data.frame() %>% rownames_to_column("cell") %>%
+  pivot_longer(cols = "curve1":"curve4",
+               names_to = "weight",
+               values_to = "value")
+
+pseudo <- slingPseudotime(epidermal_sds) %>%
+  data.frame() %>% rownames_to_column("cell") %>%
+  pivot_longer(cols = "curve1":"curve4",
+               names_to = "time",
+               values_to = "value")
+
+d <- epidermal_sce@reducedDim %>%
+  data.frame() %>% rownames_to_column("cell")
+
+curvedata <- data.frame(curvedata) %>%
+  mutate(curve = paste0("curve", curve)) %>%
+  rename("weight" = "curve")
+
+
+p <- merge(weights,
+      pseudo,
+      by.x = c("cell", "weight"),
+      by.y = c("cell", "time")) %>%
+  merge(d, by = "cell") %>%
+  filter(weight != "curve3") %>%
+  ggplot(aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(aes(color = value.y)) +
+  geom_path(data = curvedata %>% filter(weight != "curve3")) +
+  facet_wrap( ~ weight, labeller = labeller(
+    weight = c(
+      "curve1" = "Trichoblast",
+      "curve2" = "Atrichoblast",
+      "curve3" = NA,
+      "curve4" = "Cortex"
+    )
+  )) +
+  theme_void() +
+  scale_color_viridis(
+    discrete = F,
+    na.value = "lightgrey",
+    option = "D",
+    direction = -1
+  ) +
+  labs(color = "Pseudotime")
+
+p
+```
+
+Try to plot avg lineage weight on umap
+
+```{r}
+w <- weights %>% 
+  filter(weight != "curve3") %>%
+  group_by(cell) %>% summarize(Entropy(value))
+colnames(w) <- c("cell", "avg")
+
+merge(w,
+      d,
+      by = "cell") %>%
+  ggplot(aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point(aes(color = avg)) + theme_void() + 
+  scale_color_viridis(
+    discrete = F,
+    na.value = "lightgrey",
+    option = "B",
+    direction = 1
+  )
+```
+
+## Interactive 3D Plotly
+
+```{r}
+dfs <- lapply(seq_along(slingCurves(epidermal_sce)), function(l){
+    crv <- slingCurves(epidermal_sce)[[l]]
+    df <- data.frame(crv$s[crv$ord, ])
+    df$curve <- l
+    return(df)
+})
+curvedata <- do.call(rbind, dfs)
+```
+
+```{r}
+head(curvedata)
+```
+
+Plot in 3D using plotly (rerun UMAP for 3D embedding in order to do this.)
+
+```{r}
+# plot.data <- FetchData(object = epidermal_lineage, vars = c("UMAP_1", "UMAP_2", "UMAP_3", "epidermal_lineage"))
+# 
+# # Make a column of row name identities (these will be your cell/barcode names)
+# plot.data$label <- paste(rownames(plot.data))
+# 
+# fig2 <- curvedata %>% group_by(curve) %>%
+#   plot_ly(data = ., 
+#               x = ~UMAP_1, y=~UMAP_2, z=~UMAP_3,
+#               type = "scatter3d", mode="lines", marker=list(size=3)) %>% add_trace(data = plot.data, 
+#         x = ~UMAP_1, y = ~UMAP_2, z = ~UMAP_3, 
+#         color = ~epidermal_lineage,
+#         type = "scatter3d", 
+#         mode = "markers", 
+#         marker = list(size = 5, width=2, alpha=0.6), # controls size of points
+#         text=~label, #This is that extra column we made earlier for which we will use for cell ID
+#         hoverinfo="text")
+```
+
+Keep working with these lineages. 
+
+## DE genes along pseudotime using tradeSeq
+
+We have to start by choosing an appropriate number of knots.
+
+```{r}
+set.seed(1234)
+epidermal_K <- evaluateK(counts = counts, sds = epidermal_sds, k = 3:10, nGenes = 100,
+                   verbose = TRUE, plot = TRUE)
+```
+
+Fit gene-wise NB-GAMs using nknots = 6.
+
+```{r}
+cellweights <- slingCurveWeights(epidermal_sds)
+epidermal_tradeseq <- fitGAM(counts = counts,
+              sds = epidermal_sds,
+              cellWeights = cellweights,
+              nknots=6, verbose = TRUE)
+saveRDS(epidermal_tradeseq, file = "./epidermal_tradeseq.rds")
+```
+
+```{r}
+table(rowData(epidermal_tradeseq)$tradeSeq$converged)
+```
+
+```{r}
+plotGeneCount(epidermal_sds, models = epidermal_tradeseq, clusters = clustering)
+```
+
+Find markers for differentiated trichoblast and atrichoblast cells
+
+```{r}
+batch_one <- startVsEndTest(epidermal_tradeseq, lineages = TRUE, pseudotimeValues = c(8, 10))
+```
+
+```{r}
+b1_l1 <- batch_one[, 1:10] %>% 
+  filter(pvalue_lineage1 < 0.05) %>% 
+  merge(t, by = 0) %>%
+  rename("annotation" = ".") %>% 
+  rename("Gene" = "Row.names") %>%
+  arrange(desc(waldStat_lineage1))
+```
+
+
+fetch gene annotation. 
+
+```{r}
+library(org.At.tair.db)
+x <- org.At.tairSYMBOL
+mapped_tairs <- mappedkeys(x)
+xx <- as.list(x[mapped_tairs])
+t <- unlist(xx) %>% as.data.frame()
+```
+
+```{r}
+tmp <- progenitorDE %>% 
+  filter(pvalue < 0.01) %>% 
+  merge(t, by = 0) %>% 
+  rename("annotation" = ".") %>% 
+  rename("Gene" = "Row.names") %>%
+  arrange(desc(waldStat))
+tmp
+```
+
+Do GO enrichment on these genes
+
+```{r}
+patGO(data.frame(cluster = rep(1, times = nrow(tmp)), 
+                 row.names = tmp$Gene),
+      countbias,
+      groups_bp, 
+      0.05)
+```
+
+
+Plot smoothers of auxin associated processes:
+
+```{r}
+yhatSmooth <- predictSmooth(epidermal_tradeseq, gene = pseudo.signif.genes, nPoints = 50)
+
+yhatSmooth %>%
+  filter(lineage != 3) %>%
+  filter(gene %in% c("AT1G51190", "AT2G21050", "AT2G33310", "AT2G46990", "AT4G30080", "AT5G17300", "AT5G47370", "AT5G57420")) %>%
+  group_by(lineage) %>%
+  ggplot(aes(x = time, y = yhat, color = as.factor(lineage))) + 
+  geom_path() + 
+  theme_cowplot() + 
+  facet_wrap(~gene, scale = 'free_y')
+```
+
+Find genes associated with bifurcation of trichoblast and atrichoblast cells
+
+```{r}
+bifurcationDE <- earlyDETest(epidermal_tradeseq, knots = c(2, 4))
+bifurcationDE %>% 
+  filter(pvalue < 0.01) %>% 
+  merge(t, by = 0, all = F) %>% 
+  rename("annotation" = ".") %>% 
+  rename("Gene" = "Row.names") %>%
+  arrange(desc(waldStat)) %>%
+  View()
+```
+
+```{r}
+pseudot_association <- associationTest(epidermal_tradeseq, lineages = TRUE)
+signif_pseudot_association <- pseudot_association %>% filter(pvalue < 0.01)
+
+trich.signif.genes <- pseudot_association %>% filter(pvalue_1 < 0.01) %>% rownames_to_column("ID") %>% pull(ID)
+atrich.signif.genes <- pseudot_association %>% filter(pvalue_2 < 0.01) %>% rownames_to_column("ID") %>% pull(ID)
+pseudo.signif.genes <- intersect(trich.signif.genes, atrich.signif.genes)
+```
