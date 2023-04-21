@@ -1,0 +1,77 @@
+---
+title: 'Preprocessing-sctransform'
+author: 'WD'
+output:
+  pdf_document:
+    number_sections: yes
+    keep_tex: yes
+  html_document:
+    df_print: paged
+bibliography: references.bib
+---
+
+R packages we will need
+
+```{r echo=FALSE}
+library("Seurat")
+library("SeuratDisk")
+library("sctransform")
+library("tidyverse")
+library("readxl")
+```
+
+Read in gene x cell matrix
+
+```{r}
+counts_wt <- read_csv("../data/Denyer2019/GSE123818_Root_single_cell_wt_datamatrix.csv.gz")
+```
+
+Reformat count matrix 
+
+```{r}
+geneNames_wt <- counts_wt[, 1]
+counts_wt <- counts_wt[-c(1)]
+rownames(counts_wt) <- geneNames_wt$...1
+```
+
+```{r}
+#Check if protoplast DE genes have been removed
+protoplast_DE <- read_excel("../data/Denyer2019/supplementary_tab_1.xlsx", 
+                            sheet="DEGs upon Protopasting")
+
+counts_wt <- counts_wt %>%
+                  rownames_to_column("gene") %>%
+                  subset(!gene %in% protoplast_DE$`Gene ID`) %>%
+                  column_to_rownames("gene")
+```
+
+
+```{r}
+#start by creating seurat object
+denyer_wt <- CreateSeuratObject(counts_wt, project="denyer.wt")
+denyer_wt
+```
+
+```{r}
+rm(geneNames_wt)
+rm(counts_wt)
+rm(protoplast_DE)
+```
+
+```{r}
+#add metadata on % reads mapping to chloroplast and mitochondrial genes, see https://www.arabidopsis.org/portals/nomenclature/guidelines.jsp
+denyer_wt[["percent.mt"]] <- PercentageFeatureSet(denyer_wt, pattern = "^ATM")
+denyer_wt[["percent.clp"]] <- PercentageFeatureSet(denyer_wt, pattern = "^ATC")
+```
+
+Make regularized negative binomial regression using scTransform
+
+```{r}
+denyer_wt <- SCTransform(denyer_wt, vars.to.regress = c("percent.mt", "percent.clp"), verbose=TRUE)
+```
+
+Save intermediate object
+
+```{r}
+SaveH5Seurat(denyer_wt, filename = "../intermediate_files/denyer_wt_sctransform.h5seurat", overwrite=TRUE)
+```

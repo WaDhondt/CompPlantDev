@@ -1,0 +1,213 @@
+---
+title: "005-Integration.rmd"
+author: "Warre Dhondt"
+date: "11/3/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("Seurat")
+library("SeuratDisk")
+library("tidyverse")
+library("pheatmap")
+library("patchwork")
+library("plotly")
+library("RColorBrewer")
+library("viridis")
+library("ggplotify")
+```
+
+```{r}
+denyer <- LoadH5Seurat("../intermediate_files/denyer_wt_sctransform_clustered.h5seurat")
+```
+
+# Annotate clusters
+
+Annotate cluster cell types according to the marker genes they have in common with Brady et. al. 2007. 
+
+```{r}
+brady_markergenes <- read.table("../data/brady_markergenes.tsv",
+                                sep = "\t",
+                                header = TRUE,
+                                fill = TRUE)
+
+brady_markergenes <- brady_markergenes %>% 
+  pivot_longer(cols = "QC":"Trichoblast",
+               names_to = "celltype",
+               values_to = "gene")
+
+head(brady_markergenes)
+```
+
+
+I will map the top DE genes per cluster
+
+```{r}
+cluster_DEgenes <- readRDS("../intermediate_files/wt_cluster_DEgenes.rds")
+top_DEgenes <- cluster_DEgenes %>%
+  group_by(cluster) %>%
+  slice_max(n = 50, order_by = avg_log2FC) %>%
+  ungroup()
+head(top_DEgenes)
+```
+
+Now merge both based on gene and display in a heatmap
+
+```{r}
+combined_df <- merge(top_DEgenes, brady_markergenes, by = "gene")
+head(combined_df)
+```
+
+```{r}
+# Count gennes mapping to celltypes for every group
+heatmap_data <- combined_df %>%
+  group_by(cluster) %>%
+  dplyr::select(cluster, celltype) %>%
+  table() %>%
+  as.data.frame.matrix()
+
+#normalize counts by row (cluster)
+heatmap_data_scaled <- apply(t(heatmap_data), 2, function(x){x/sum(x)}) %>% t()
+
+# Choose colors
+colorscale <- colorRampPalette(brewer.pal(n = 20, name = "YlGnBu"))(50)
+
+# Make heatmap
+p1 <- pheatmap(mat = heatmap_data_scaled,
+         cluster_rows = TRUE, cluster_cols = TRUE, scale="none", 
+         cellwidth = 15, cellheight = 15, display_numbers = heatmap_data, color = magma(100, direction = -1))
+
+p2 <- DimPlot(denyer, reduction = "umap", group.by = "SCT_snn_res.1", label.size = 6, pt.size = 0.7) +
+  theme_void() + labs(title = "")
+
+```
+
+```{r}
+p1 <- as.ggplot(p1)
+p2 <- as.ggplot(p2)
+p1+p2 + plot_annotation(tag_levels = "A")
+```
+
+Check if any cluster corresponds to high mitotic activity
+
+```{r}
+VlnPlot(denyer, features = c("AT4G37490", "AT4G32830"))
+```
+Cluster 16 has high devision activity, which is why it may be marked as meristematic xylem tissue while they are actually cycling cells. 
+
+Investigate meristematic xylem markers. 
+
+```{r}
+merixylem <- combined_df %>% filter(celltype == "Meri..Xylem") %>% group_by(cluster) %>% select(gene)
+```
+
+- Cluster 16
+
+4/10 markers are associated with cell division (AT2G25880, AT4G32830, AT2G33560, AT3G63130), and for others there was no annotation pointing to a role in vascular development, so annotate as meristematic tissue, also because of high CYCB1;1 expression. 
+
+- Cluster 7
+
+All markers are genes encoding histones, which are typically upregulated in the S phase. May represent cycling epidermal-lineage cells? Other upregulated genes are involved in stress responses (AT1G15040, ) and senescence (AT4G35770). Will annotate this as unsure. 
+
+- Cluster 4
+
+Markers are involved in transcription (AT3G14740), or are histones (AT1G07790, AT5G59910, AT1G51060, AT3G54560, AT4G27230), and a ribosomal protein gene (AT5G64140). Cluster 4 therefore likely consists of meristematic cells
+
+- Cluster 3
+
+Again, markers are involved in replication, e.g. SAR (AT3G05060), ribosomal proteins (AT3G03920, AT2G42740, AT3G58700), RNA metabolism (AT3G57150, AT1G56110).
+
+- Cluster 10
+
+Expressed QC marker gene GLV8 (AT2G03830), also expressed in meristematic clusters 3, 16 and 17:
+
+```{r}
+VlnPlot(denyer, features = c("AT2G03830"))
+```
+
+Also expressed GA associated genes (AT5G25900, AT1G69700) which are marker as QC. GA is also known to have a positive effect on meristem identity (https://doi.org/10.3389/fpls.2022.882517). Merixylem markers are again associated with mitotic activity: histones (AT3G03920, AT2G38810), ribosomal proteins (AT2G42740, AT3G13580, AT4G09800), RNA metabolism (AT3G57150), etc. Interestingly expresses PIN1, which has a role in QC identity via control of Auxin gradients during development. 
+
+Annotate cluster 10 as QC. 
+
+- Cluster 2
+
+```{r}
+combined_df %>% filter(cluster == 2)
+```
+
+AT4G20260 is involved in microtubule stabilization and may be involved in salt stress, which is the case for AT1G23040 as well. AT2G31570 is involved in oxidative stress. AT2G26670 (GUN2) can be involved in stress-induced chlorplast dysfunction. AT4G21980 is involved in autophagy, AT5G63030 plays function in redox activity. All things point towards stressed cells
+
+Use this information to perform final cluster annotation:
+
+```{r}
+new.ids <- c("Columella 1", "Lateral root cap", "Stressed 1", "Meristematic 1", "Meristematic 2", "Trichoblast 1", "Atrichoblast 1", "Stressed 2", "Stele (Phloem)", "Trichoblast 2", "QC", "Atrichoblast 2", "Stele (Xylem)", "Stele (PPP)", "Cortex 1", "Endodermis", "Meristematic 3", "Columella 2", "Cortex 2")
+names(new.ids) <- levels(denyer)
+denyer <- RenameIdents(denyer, new.ids)
+
+denyer <- SetIdent(denyer, value = "SCT_snn_res.1")
+new.ids <- c("Columella", "Lateral root cap", "Stressed", "Meristematic", "Meristematic", "Trichoblast", "Atrichoblast", "Stressed", "Phloem", "Trichoblast", "QC", "Atrichoblast", "Xylem", "Phloem pole pericycle", "Cortex", "Endodermis", "Meristematic", "Columella", "Cortex")
+names(new.ids) <- levels(denyer)
+denyer <- RenameIdents(denyer, new.ids)
+denyer[["Brady.compact"]] <- Idents(denyer)
+
+palette <- colorRampPalette(brewer.pal(n = 8, "Dark2"))(19)
+
+p3 <- DimPlot(denyer, reduction = "umap", label = TRUE, repel = TRUE, group.by = "Brady.compact", label.size = 4)
+p3
+```
+That's better. 
+
+```{r fig.width = 8 fig.height = 6}
+genes <- list(QC = c("AT3G26120", "AT2G03830"), 
+              Cortex = c("AT1G62510", "AT1G09750"), 
+              Endodermis = c("AT5G57620"), 
+              Atrichoblast = c("AT1G79840"), 
+              Trichoblast = "AT5G49270", 
+              Columella = c("AT1G17400", "AT1G26870"), 
+              Phloem = c("AT1G79430"), 
+              Xylem = c("AT1G71930"), 
+              Stressed = c("AT4G35770", "AT1G15040", "AT2G43510"), 
+              Meristematic = c("AT4G37490", "AT4G37490", "AT4G32830", "AT3G05060", "AT2G42740"))
+
+genes <- lapply(genes, function(x){unique(x)})
+
+DotPlot(denyer, features = genes, group.by = "SCT_snn_res.1", cluster.idents = TRUE) +theme(axis.text.x = element_text(angle = 45, hjust=1), strip.text.x = element_text(angle = 90, hjust = 0))
+```
+
+Save object
+
+```{r}
+denyer[["Brady.annotation"]] <- Idents(object = denyer)
+SaveH5Seurat(denyer, filename = "../intermediate_files/denyer_sctransform_annotated.h5seurat", overwrite = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
