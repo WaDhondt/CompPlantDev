@@ -1,31 +1,52 @@
-## Computational methods in plant developmental biology
+# Github repository for "A Stroll Through the Developmental Landscape of Plants"
 
-<div align="center"> "I wish, lovely friend, that I were able to
-    happily hand you at once the disentangling word! —   
-Watch now and be transformed, how bit by bit the plant-form,
-    guided stepwise, builds to emerge in blossom and fruit!
-Out of the germ it unfolds, the moment the still and fertile
-    Lap of the earth has lovingly let it go out into life,
-there where the charm of light, the holy eternal mover
-    now ushers in the most delicate structures of burgeoning leaves.
-This was a power that simply slept in the seed; a prototype
-    lay there closed and curled up in itself inside the husk,
-leaf and taproot and seed, as yet half-formed and colorless;
-    thus the dry kernel holds and protects the dormant life,
-then it gushes, heaving up, trusting to milder moistures,
-    lifts itself all at once out of the enveloping night." 
-- Johann Wolfgang Von Goethe, The metamorphosis of plants (1790) </div>
+## Repo structure
 
-### Computational models of plant development and form
-https://doi.org/10.1111/j.1469-8137.2011.04009.x
+- `preprocessing/` contains scripts used for preprocessing the raw gene x cell matrix using Seurat
+ * In `001-PreprocessingLogNormalize.Rmd` the data was filtered based on QC metrics and log normalized
+ * In `002-PreprocessingSctransform.Rmd` the data was not filtered and normalized using the regularized negative binomial regression from `sctransform`
+ * In `003-DimredClustering.Rmd` the data from `002-PreprocessingSctransform.Rmd` was clustered and visualized using UMAP, and we identified cluster-specific marker genes
+ * In `004-CelltypeAnnotation.Rmd` the clusters were assigned a cell type according to the cluster-specific marker genes and marker genes from Brady 2007 (https://doi.org/10.1126/science.1146265). 
+ * In `005-PlotFilteredCells.Rmd` the cells that were filtered in `001-PreprocessingLogNormalize.Rmd` were integrated in the annotated atlas to determine the bias during filtering
+ * In `006-PloidyTimezone.Rmd` each cell was assigned a ploidy level and developmental zone annotation by correlating its transcriptome with reference profiles (see https://github.com/ohlerlab/COPILOT)
 
-Modelling techniques to model plant development
 
-### The metaphor of developmental landscapes (Waddington’s landscape)
-https://www.biologia.unipd.it/giuseppe.fusco/PDFs/2014%20Fusco%20et%20al%20OUP.pdf
+TODO:
 
-Developmental processes: Differentiation, cell fate decision
+- Reformat code for trajectory inference notebooks
+- Add data and intermediate objects as gz
+- Finish readme
 
-### Reconstructing developmental landscapes from observational data
-
+.
+├── LICENSE
+├── README.md
+├── data
+│   ├── Brady2007
+│   ├── Denyer2019
+│   │   ├── GSE123818_Root_single_cell_wt_datamatrix.csv.gz
+│   │   └── supplementary_tab_1.xlsx
+│   ├── PlantPhone
+│   │   └── LR_pair_ath.RDa
+│   └── Shahan2022
+│       ├── Root_bulk_arabidopsis_curated.RD
+│       └── endo_exp.RD
+├── intermediate_files
+│   ├── denyer_wt_lognormalized.h5seurat
+│   ├── denyer_wt_sctransform.h5seurat
+│   ├── denyer_wt_sctransform_annotated.h5seurat
+│   ├── denyer_wt_sctransform_clustered.h5seurat
+│   ├── epidermal_tradeseq.rds
+│   └── wt_cluster_DEgenes.rds
+├── preprocessing
+│   ├── 001-PreprocessingLogNormalize.Rmd
+│   ├── 002-PreprocessingSctransform.Rmd
+│   ├── 003-DimredClustering.Rmd
+│   ├── 004-CelltypeAnnotation.Rmd
+│   ├── 005-PlotFilteredCells.Rmd
+│   └── 006-PloidyTimezone.Rmd
+├── project.md
+└── trajectory_inference
+    ├── 007-EpidermalTrajectory.Rmd
+    ├── 008-TrajectoryGO.Rmd
+    └── 009-CellCellCommunication.Rmd
 
