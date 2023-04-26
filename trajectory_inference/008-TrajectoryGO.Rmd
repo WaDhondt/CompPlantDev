@@ -1,0 +1,280 @@
+---
+title: "GO enrichment on expression clusters"
+output: html_notebook
+---
+
+```{r}
+library("Seurat")
+library("SeuratDisk")
+library("SingleCellExperiment")
+library("slingshot")
+library("tidyverse")
+library("RColorBrewer")
+library("ggplotify")
+library("patchwork")
+library("goseq")
+library("dtw")
+library("pheatmap")
+library("tradeSeq")
+library("ComplexHeatmap")
+library("simplifyEnrichment")
+```
+
+```{r}
+denyer <-
+  LoadH5Seurat("../intermediate_files/denyer_wt_sctransform_annotated.h5seurat")
+
+identities = c(
+  "QC",
+  "Cortex 1",
+  "Cortex 2",
+  "Meristematic 1",
+  "Meristematic 2",
+  "Atrichoblast 1",
+  "Atrichoblast 2",
+  "Trichoblast 1",
+  "Trichoblast 2"
+)
+epidermal_lineage <-
+  denyer[, (denyer@meta.data$Brady.annotation %in% identities)]
+epidermal_lineage[["epidermal_lineage"]] <-
+  Idents(epidermal_lineage)
+
+epidermal_tradeseq <-
+  readRDS("../intermediate_files/epidermal_tradeseq.rds")
+```
+
+# GO enrichment
+
+```{r}
+countbias <- rowMeans(denyer) %>% data.frame(row.names = rownames(denyer))
+countbias <- countbias[rownames(countbias) %in% assayed.genes,]
+```
+
+
+```{r}
+library("biomaRt")
+listMarts(host = "plants.ensembl.org")
+listDatasets(useMart(biomart = "plants_mart", host = "plants.ensembl.org"))
+ensembl <-
+  useMart(biomart = "plants_mart",
+          host = "plants.ensembl.org",
+          dataset = "athaliana_eg_gene")
+groups <-
+  getBM(
+    attributes = c("go_id", "name_1006", "namespace_1003", "ensembl_gene_id"),
+    filters = "ensembl_gene_id",
+    value = assayed.genes,
+    mart = ensembl
+  )
+groups_bp <-
+  groups %>% filter(groups$namespace_1003 == c("biological_process"))
+head(groups_bp)
+```
+
+```{r}
+patGO <- function(ClusterGenes, countbias, getgo, pval) {
+  results <- list()
+  assayed.genes <- rownames(denyer@assays$SCT)
+  for (c in 1:length(unique(ClusterGenes$cluster))) {
+    print(paste0("Calculating cluster", c))
+    de.genes <- ClusterGenes %>% filter(cluster == c) %>% rownames()
+    gene.vector <- as.integer(assayed.genes %in% de.genes)
+    names(gene.vector) <- assayed.genes
+    pwf = nullp(gene.vector,
+                "Arabidopsis",
+                bias.data = countbias,
+                plot.fit = F)
+    go.nobias <-
+      suppressWarnings(goseq(pwf, gene2cat = getgo))
+    go.nobias$over_represented_qvalue <-
+      p.adjust(go.nobias$over_represented_pvalue, method = "BH")
+    results[[c]] <- go.nobias
+    print(paste0("Added cluster", c))
+  }
+  results <- enframe(results) %>%
+    unnest() %>% filter(over_represented_qvalue < pval)
+  results
+}
+```
+
+# Find modules
+
+```{r}
+yhatSmooth <- predictSmooth(epidermal_tradeseq, gene = pseudo.signif.genes, nPoints = 30, tidy = FALSE)
+
+trich_dat <- t(scale(t(yhatSmooth[, 1:30])))
+heatSmoothTrichoblast <- pheatmap::pheatmap(trich_dat,
+                       cluster_cols = FALSE,
+                       cluster_rows = TRUE, 
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, main = "Trichoblast lineage", cutree_rows = 7, clustering_method = "ward.D")
+
+atrich_dat <- t(scale(t(yhatSmooth[, 31:60])))
+
+heatSmoothAtrichoblast <- pheatmap::pheatmap(atrich_dat,
+                       cluster_cols = FALSE,
+                       cluster_rows = TRUE, 
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, main = "Atrichoblast lineage", cutree_rows = 8, clustering_method = "ward.D")
+
+cortex_dat <- t(scale(t(yhatSmooth[, 61:90])))
+heatSmoothCortex <- pheatmap::pheatmap(cortex_dat,
+                       cluster_cols = FALSE,
+                       cluster_rows = TRUE,
+                       show_rownames = FALSE, 
+                       show_colnames = FALSE, main = "Cortex lineage", cutree_rows = 9)
+
+p1 <- as.ggplot(heatSmoothTrichoblast)
+p2 <- as.ggplot(heatSmoothAtrichoblast)
+p3 <- as.ggplot(heatSmoothCortex)
+```
+
+```{r}
+trich_modules <-
+  data.frame(cluster = as.factor(cutree(heatSmoothTrichoblast$tree_row,  k = 7)))
+
+atrich_modules <-
+  data.frame(cluster = as.factor(cutree(heatSmoothAtrichoblast$tree_row, k = 8)))
+
+cortex_modules <-
+  data.frame(cluster = as.factor(cutree(heatSmoothCortex$tree_row, k = 9)))
+```
+
+Do GO enrichment on modules for each lineage: 
+
+```{r message=FALSE, warning=FALSE}
+trich_GO <- patGO(trich_modules, countbias, groups_bp, 0.05)
+
+atrich_GO <- patGO(atrich_modules, countbias, groups_bp, 0.05)
+
+cortex_GO <- patGO(cortex_modules, countbias, groups_bp, 0.05)
+```
+
+```{r}
+# get Slingshot data for plotting
+curvedata <- slingCurves(epidermal_sds)
+pseudotimedata <- slingPseudotime(epidermal_sds)
+```
+
+```{r}
+# Create lineage data for plotting
+
+# trichoblast
+trich_merged <- data.frame(commitment = curvedata$Lineage1$w,
+                           latent_time = pseudotimedata[, 1]) %>%
+  rownames_to_column("cell") %>%
+  drop_na() %>%
+  arrange(latent_time)
+
+trich_l <- max(trich_merged$latent_time)
+
+# atrichoblast
+atrich_merged <- data.frame(commitment = curvedata$Lineage2$w, 
+                            latent_time = pseudotimedata[, 2]) %>% 
+  rownames_to_column("cell") %>% 
+  drop_na() %>% 
+  arrange(latent_time)
+
+atrich_l <- max(atrich_merged$latent_time)
+
+# cortex
+cortex_merged <- data.frame(commitment = curvedata$curve4$w, 
+                            latent_time = pseudotimedata[, 4]) %>% 
+  rownames_to_column("cell") %>% 
+  drop_na() %>% 
+  arrange(latent_time)
+
+cortex_l <- max(cortex_merged$latent_time)
+```
+
+Get plot metadata
+
+```{r}
+sub <- epidermal_lineage[, !epidermal_lineage@meta.data$epidermal_lineage %in% c("Meristematic 2")]
+
+getmetadata <- function(lineagedata, time, cols){
+  ploidy_tmp <- sub[["ploidy.ID.P"]] %>% rownames_to_column("cell")
+
+ploidy_meta <- lineagedata %>% 
+  dplyr::select(-commitment) %>% 
+  merge(ploidy_tmp, by = "cell") %>% 
+  mutate(latent_time = round(latent_time*(30/time)))
+
+ploidy_meta <- sapply(split(ploidy_meta, ploidy_meta$latent_time, drop = F), function(x){names(which.max(table(x$ploidy.ID.P)))})
+
+timezone_tmp <- sub[["timezone.ID.P"]] %>% 
+  rownames_to_column("cell")
+
+timezone_meta <- lineagedata %>% 
+  dplyr::select(-commitment) %>% 
+  merge(timezone_tmp, by = "cell") %>% 
+  mutate(latent_time = round(latent_time*(30/time)))
+
+timezone_meta <- sapply(split(timezone_meta, timezone_meta$latent_time, drop = F), function(x){names(which.max(table(x$timezone.ID.P)))})
+
+meta <- data.frame(Ploidy = paste0("C", str_match(pattern = "(\\d+)C", ploidy_meta)[, 2]), 
+                   timezone = timezone_meta[], 
+                   row.names = colnames(yhatSmooth[, cols]))
+}
+
+trich_meta <- getmetadata(lineagedata = trich_merged, time = trich_l, cols = 1:30)
+atrich_meta <- getmetadata(lineagedata = atrich_merged, time = atrich_l, cols = 31:60)
+# cortex_meta <- getmetadata(lineagedata = cortex_merged, time = cortex_l, cols = 61:90)
+
+colors <- list("Ploidy" = c(C2 = "#DCEDC8", C4 = "#42B3D5", C8 = "#FDEA6F", C16 = "#CF4F29"),
+               "timezone" = c(Elongation = "#1F968BFF", Maturation = "#481567FF", Meristem = "#95D840FF"))
+```
+
+Make plots
+
+```{r}
+heatmapGO <- function(GO, data, filename, modules, annotation_meta){
+  c <-
+  GO %>% dplyr::select(name, category, term, over_represented_qvalue) %>% 
+  distinct(name, term, .keep_all = T) %>%
+  mutate(over_represented_qvalue = signif(over_represented_qvalue, digits = 2)) %>%
+  mutate(text = paste(term, paste0("(", over_represented_qvalue, ")"))) %>% 
+  mutate(fontsize = 9) %>%
+  split(GO$name) %>%
+  lapply(function(x){data.frame(text = x$text, fontsize = x$fontsize)})
+  
+  pdf(file = filename, width = 14, height = 6.5)
+  p <- Heatmap(data,
+        column_dend_reorder = FALSE,
+        cluster_columns = FALSE, 
+        show_column_names = FALSE, 
+        row_split = modules,
+        show_row_names = FALSE,
+        border = TRUE, 
+        right_annotation = rowAnnotation(
+          textbox = anno_textbox(modules$cluster, c, word_wrap = TRUE, add_new_line = TRUE)), 
+        width = unit(15, "cm"), 
+        top_annotation = HeatmapAnnotation(df = annotation_meta, col = colors)
+  )
+draw(p)
+dev.off()
+}
+
+heatmapGO(
+  GO = trich_GO,
+  data = trich_dat,
+  filename = "../figures/trichGO_heatmap_wallenius.pdf",
+  modules = trich_modules,
+  annotation_meta = trich_meta
+)
+heatmapGO(
+  GO = atrich_GO,
+  data = atrich_dat,
+  filename = "../figures/AtrichGO_heatmap_wallenius.pdf",
+  modules = atrich_modules,
+  annotation_meta = atrich_meta
+)
+
+# heatmapGO(
+#   GO = cortex_GO,
+#   data = cortex_dat,
+#   filename = "../figures/CortexGO_heatmap.png",
+#   modules = cortex_modules
+# )
+```
