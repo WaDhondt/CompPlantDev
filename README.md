@@ -6,7 +6,8 @@
 .
 ├── LICENSE
 ├── README.md
-├── data
+├── project.md
+├── data.tar.gz
 │   ├── Brady2007
 │   ├── Denyer2019
 │   │   ├── GSE123818_Root_single_cell_wt_datamatrix.csv.gz
@@ -23,7 +24,6 @@
 │   ├── 004-CelltypeAnnotation.Rmd
 │   ├── 005-PlotFilteredCells.Rmd
 │   └── 006-PloidyTimezone.Rmd
-├── project.md
 └── trajectory_inference
     ├── 007-EpidermalTrajectory.Rmd
     ├── 008-TrajectoryGO.Rmd
