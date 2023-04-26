@@ -16,13 +16,6 @@
 │   └── Shahan2022
 │       ├── Root_bulk_arabidopsis_curated.RD
 │       └── endo_exp.RD
-├── intermediate_files
-│   ├── denyer_wt_lognormalized.h5seurat
-│   ├── denyer_wt_sctransform.h5seurat
-│   ├── denyer_wt_sctransform_annotated.h5seurat
-│   ├── denyer_wt_sctransform_clustered.h5seurat
-│   ├── epidermal_tradeseq.rds
-│   └── wt_cluster_DEgenes.rds
 ├── preprocessing
 │   ├── 001-PreprocessingLogNormalize.Rmd
 │   ├── 002-PreprocessingSctransform.Rmd
@@ -34,7 +27,7 @@
 └── trajectory_inference
     ├── 007-EpidermalTrajectory.Rmd
     ├── 008-TrajectoryGO.Rmd
-    └── 009-CellCellCommunication.Rmd
+    └── 009-LigandReceptor.Rmd
 ```
 
 
@@ -46,9 +39,9 @@
     * In `005-PlotFilteredCells.Rmd` the cells that were filtered in `001-PreprocessingLogNormalize.Rmd` were integrated in the annotated atlas to determine the bias during filtering
     * In `006-PloidyTimezone.Rmd` each cell was assigned a ploidy level and developmental zone annotation by correlating its transcriptome with reference profiles (see https://github.com/ohlerlab/COPILOT)
 
-
-TODO:
-
-- Reformat code for trajectory inference notebooks
-- Add data and intermediate objects as gz
-- Finish readme
+- `trajectory_inference/` contains scripts used for trajectory inference on the preprocessed data using Slingshot
+    * In `007-EpidermalTrajectory.Rmd` we infer developmental trajectories on the subset of epidermal cell types, and perform trajectory differential expression using tradeSeq. 
+    * In `008-TrajectoryGO.Rmd` genes are clustered according to their expression along pseudotime, and we perform GO enrichment analysis on these clusters. 
+    * In `009-LigandReceptor.Rmd` we infer ligand-receptor interactions between the different lineages based on co-expression using PlantPhoneDB. 
+    
+- `data.tar.gz` contains all data used during the analysis and `sessionInfo.txt` contains information on the R package versions. 
