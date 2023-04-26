@@ -6,9 +6,9 @@
 .
 ├── LICENSE
 ├── README.md
-├── project.md
 ├── data.tar.gz
 │   ├── Brady2007
+│   │   └── brady_markergenes.tsv
 │   ├── Denyer2019
 │   │   ├── GSE123818_Root_single_cell_wt_datamatrix.csv.gz
 │   │   └── supplementary_tab_1.xlsx
@@ -24,10 +24,14 @@
 │   ├── 004-CelltypeAnnotation.Rmd
 │   ├── 005-PlotFilteredCells.Rmd
 │   └── 006-PloidyTimezone.Rmd
+├── project.md
+├── report.pdf
+├── sessionInfo.txt
 └── trajectory_inference
     ├── 007-EpidermalTrajectory.Rmd
     ├── 008-TrajectoryGO.Rmd
-    └── 009-LigandReceptor.Rmd
+    ├── 009-LigandReceptor.Rmd
+    └── epidermal_tradeseq.rds
 ```
 
 
